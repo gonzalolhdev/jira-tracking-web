@@ -1,0 +1,9 @@
+{
+  "JIRA_BASE_URL": "https://your-company.atlassian.net",
+  "TEMPO_API_TOKEN": "your_tempo_api_token_here",
+  "TEMPO_API_BASE": "https://api.tempo.io/4",
+  "TIMEZONE": "America/New_York",
+  "DEFAULT_PROJECTS": ["PROJ", "OPS", "PLAT"],
+  "IN_PROGRESS_STATUSES": ["In Progress"],
+  "SESSION_STATE_PATH": ".jira-track/session.json"
+}

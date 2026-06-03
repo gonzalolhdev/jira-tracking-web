@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+.pytest_cache
+.ruff_cache
+.jira-track
+node_modules
+web/node_modules
+web/dist
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.log
+tests
+.agents
+.vscode

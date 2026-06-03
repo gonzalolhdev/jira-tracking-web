@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+.env
+.jira-track/
+*.egg-info/
+web/node_modules/
+web/dist/
+tsconfig.tsbuildinfo
+.agents/
+.vscode/
