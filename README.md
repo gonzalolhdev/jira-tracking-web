@@ -42,8 +42,28 @@ To avoid running a full browser desktop stack inside Docker, use host Chrome via
 
 1. Start Chrome with remote debugging enabled:
 
+macOS:
+
 ```bash
 open -na "Google Chrome" --args --remote-debugging-port=9222
+```
+
+Linux:
+
+```bash
+google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/jira-track-chrome
+```
+
+Windows (PowerShell):
+
+```powershell
+Start-Process chrome.exe "--remote-debugging-port=9222 --user-data-dir=$env:TEMP\jira-track-chrome"
+```
+
+WSL/WSL2 (launches Windows Chrome from WSL):
+
+```bash
+cmd.exe /C start "" "chrome.exe" --remote-debugging-port=9222 --user-data-dir="%TEMP%\\jira-track-chrome"
 ```
 
 2. Trigger login from the web app (or API) while Docker is running.
@@ -177,10 +197,30 @@ jira-track login-sso
 
 Reuse an already-running Chrome session (so you can often avoid re-entering credentials):
 
-1. Start Chrome with remote debugging enabled (macOS):
+1. Start Chrome with remote debugging enabled:
+
+macOS:
 
 ```bash
 open -na "Google Chrome" --args --remote-debugging-port=9222
+```
+
+Linux:
+
+```bash
+google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/jira-track-chrome
+```
+
+Windows (PowerShell):
+
+```powershell
+Start-Process chrome.exe "--remote-debugging-port=9222 --user-data-dir=$env:TEMP\jira-track-chrome"
+```
+
+WSL/WSL2 (launches Windows Chrome from WSL):
+
+```bash
+cmd.exe /C start "" "chrome.exe" --remote-debugging-port=9222 --user-data-dir="%TEMP%\\jira-track-chrome"
 ```
 
 2. Run login using that browser session:
