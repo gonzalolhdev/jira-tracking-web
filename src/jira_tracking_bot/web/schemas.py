@@ -58,3 +58,15 @@ class SubmitResponse(BaseModel):
 class DayRefreshRequest(BaseModel):
     date: str  # ISO format YYYY-MM-DD
     timezone: str | None = None
+
+
+class DayAddTicketRequest(BaseModel):
+    date: str  # ISO format YYYY-MM-DD
+    issue_key: str
+    timezone: str | None = None
+
+
+class DayAddTicketRequest(BaseModel):
+    date: str  # ISO format YYYY-MM-DD
+    issue_key: str
+    timezone: str | None = None

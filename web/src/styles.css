@@ -485,6 +485,36 @@ button.danger-ghost:hover:not(:disabled) {
   transition: transform 120ms ease, border-color 120ms ease, background-color 120ms ease;
 }
 
+.day-add-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  line-height: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(79, 142, 247, 0.45);
+  color: #89bcff;
+  background: rgba(79, 142, 247, 0.12);
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+  transition: transform 120ms ease, border-color 120ms ease, background-color 120ms ease;
+}
+
+.day-add-btn svg {
+  display: block;
+}
+
+.day-add-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(79, 142, 247, 0.75);
+  background: rgba(79, 142, 247, 0.2);
+}
+
+.day-add-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .day-refresh-btn svg {
   display: block;
 }
@@ -613,6 +643,18 @@ tbody tr:hover td {
   font-size: 13px;
   color: var(--accent);
   font-weight: 500;
+}
+
+.ticket-link {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px dotted color-mix(in srgb, var(--accent) 65%, transparent);
+}
+
+.ticket-link:hover,
+.ticket-link:focus-visible {
+  border-bottom-color: var(--accent);
+  text-decoration: none;
 }
 
 /* Issue type icon+label */
@@ -780,6 +822,119 @@ tr.secondary-zero .issue-type-badge {
   box-shadow: none !important;
   transform: none !important;
   border-color: transparent !important;
+}
+
+.manual-ticket-backdrop {
+  position: fixed;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: rgba(3, 4, 8, 0.58);
+  z-index: 66;
+  cursor: default;
+  box-shadow: none !important;
+  transform: none !important;
+  border-color: transparent !important;
+}
+
+.manual-ticket-backdrop:hover {
+  background: rgba(3, 4, 8, 0.58) !important;
+  box-shadow: none !important;
+  transform: none !important;
+  border-color: transparent !important;
+}
+
+.manual-ticket-modal {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -46%) scale(0.98);
+  width: min(520px, 94vw);
+  background: linear-gradient(180deg, #131824 0%, #0f131d 100%);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.55);
+  z-index: 68;
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 180ms ease, opacity 180ms ease;
+  overflow: hidden;
+}
+
+.manual-ticket-modal.open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, -50%) scale(1);
+}
+
+.manual-ticket-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.manual-ticket-header h2 {
+  margin: 4px 0 0;
+  font-family: "Syne", sans-serif;
+  font-size: 1.08rem;
+  letter-spacing: -0.02em;
+}
+
+.manual-ticket-close {
+  width: 30px;
+  height: 30px;
+  line-height: 1;
+  border-radius: 999px;
+  padding: 0;
+  font-size: 1rem;
+}
+
+.manual-ticket-form {
+  padding: 14px 18px 18px;
+  display: grid;
+  gap: 10px;
+}
+
+.manual-ticket-form label {
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-2);
+}
+
+.manual-ticket-form input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 10px 11px;
+  font-family: "DM Mono", monospace;
+  font-size: 0.9rem;
+  background: var(--bg-2);
+  color: var(--ink-0);
+}
+
+.manual-ticket-form input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(79, 142, 247, 0.18);
+}
+
+.manual-ticket-help {
+  margin: -2px 0 0;
+  color: var(--ink-2);
+  font-size: 0.76rem;
+}
+
+.manual-ticket-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
 }
 
 .export-backdrop:hover {
@@ -1196,6 +1351,18 @@ tr.secondary-zero .issue-type-badge {
 }
 
 @media (max-width: 740px) {
+  .manual-ticket-modal {
+    width: calc(100vw - 16px);
+  }
+
+  .manual-ticket-header {
+    padding: 14px 14px 9px;
+  }
+
+  .manual-ticket-form {
+    padding: 12px 14px 14px;
+  }
+
   .export-modal {
     width: min(100vw - 16px, 980px);
     height: min(92vh, 860px);

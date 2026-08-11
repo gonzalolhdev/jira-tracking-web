@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from fastapi.testclient import TestClient
 
@@ -17,11 +18,16 @@ class _FakeJiraClientNoLogs:
         return None
 
     def search_issues(self, *, jql: str, max_results: int = 100) -> list[Issue]:
-        _ = (jql, max_results)
-        return [
-            Issue(key="PROJ-100", issue_type="Bug", summary="Bug issue", status="In Progress"),
-            Issue(key="PROJ-101", issue_type="Story", summary="Story issue", status="In Progress"),
-        ]
+        _ = max_results
+        issues = {
+            "PROJ-100": Issue(key="PROJ-100", issue_type="Bug", summary="Bug issue", status="In Progress"),
+            "PROJ-101": Issue(key="PROJ-101", issue_type="Story", summary="Story issue", status="In Progress"),
+        }
+        match = re.search(r'key\s*=\s*"([A-Za-z0-9_-]+)"', jql)
+        if match:
+            issue = issues.get(match.group(1).upper())
+            return [issue] if issue else []
+        return [issues["PROJ-100"], issues["PROJ-101"]]
 
     def get_current_user_account_id(self) -> str:
         return "user-123"
@@ -100,3 +106,54 @@ def test_refresh_day_logged_time_wins_and_zeroes_generated(monkeypatch) -> None:
     assert entries["PROJ-100"]["worklog_id"] == 5001
     assert entries["PROJ-101"]["source"] == "generated"
     assert entries["PROJ-101"]["minutes"] == 0
+
+
+def test_add_day_ticket_returns_generated_manual_entry(monkeypatch) -> None:
+    monkeypatch.setattr(web_app, "load_config", lambda: _fake_config())
+    monkeypatch.setattr(web_app, "JiraClient", _FakeJiraClientNoLogs)
+
+    client = TestClient(web_app.app)
+    resp = client.post(
+        "/api/day/tickets",
+        json={"date": "2026-04-02", "issue_key": "PROJ-101"},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["date"] == "2026-04-02"
+    assert payload["issue_key"] == "PROJ-101"
+    assert payload["source"] == "generated-manual"
+    assert payload["minutes"] == 0
+
+
+def test_add_day_ticket_returns_logged_entry_when_worklog_exists(monkeypatch) -> None:
+    monkeypatch.setattr(web_app, "load_config", lambda: _fake_config())
+    monkeypatch.setattr(web_app, "JiraClient", _FakeJiraClientWithLogs)
+
+    client = TestClient(web_app.app)
+    resp = client.post(
+        "/api/day/tickets",
+        json={"date": "2026-04-02", "issue_key": "PROJ-100"},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["date"] == "2026-04-02"
+    assert payload["issue_key"] == "PROJ-100"
+    assert payload["source"] == "logged"
+    assert payload["minutes"] == 60
+    assert payload["worklog_id"] == 5001
+
+
+def test_add_day_ticket_rejects_unknown_ticket(monkeypatch) -> None:
+    monkeypatch.setattr(web_app, "load_config", lambda: _fake_config())
+    monkeypatch.setattr(web_app, "JiraClient", _FakeJiraClientNoLogs)
+
+    client = TestClient(web_app.app)
+    resp = client.post(
+        "/api/day/tickets",
+        json={"date": "2026-04-02", "issue_key": "PROJ-999"},
+    )
+
+    assert resp.status_code == 404
+    assert "not found" in resp.json()["detail"].lower()

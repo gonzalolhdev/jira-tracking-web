@@ -29,6 +29,7 @@ type AuthStatus = {
   auth_mode: string;
   session_exists: boolean;
   cookies: number;
+  jira_base_url?: string;
 };
 
 type ActivityLogItem = {
@@ -130,6 +131,17 @@ async function responseDetail(resp: Response): Promise<string> {
 
 function requiresSsoLogin(status: AuthStatus | null): boolean {
   return Boolean(status && !status.session_exists);
+}
+
+function buildIssueBrowseUrl(
+  jiraBaseUrl: string | undefined,
+  issueKey: string,
+): string | null {
+  const trimmedBase = jiraBaseUrl?.trim();
+  if (!trimmedBase) {
+    return null;
+  }
+  return `${trimmedBase.replace(/\/+$/, "")}/browse/${encodeURIComponent(issueKey)}`;
 }
 
 function IssueTypeIcon({ type }: { type: string }) {
@@ -251,6 +263,14 @@ export default function App() {
   const [refreshingDayDate, setRefreshingDayDate] = useState<string | null>(
     null,
   );
+  const [addTicketModalDayDate, setAddTicketModalDayDate] = useState<
+    string | null
+  >(null);
+  const [addTicketInput, setAddTicketInput] = useState("");
+  const [addingTicketDayDate, setAddingTicketDayDate] = useState<string | null>(
+    null,
+  );
+  const [addTicketError, setAddTicketError] = useState<string | null>(null);
   const [daySubmitErrors, setDaySubmitErrors] = useState<
     Record<string, string>
   >({});
@@ -795,6 +815,108 @@ export default function App() {
     }
   }
 
+  function openAddTicketModal(dayDate: string) {
+    setAddTicketModalDayDate(dayDate);
+    setAddTicketInput("");
+    setAddTicketError(null);
+  }
+
+  function closeAddTicketModal() {
+    if (addingTicketDayDate) {
+      return;
+    }
+    setAddTicketModalDayDate(null);
+    setAddTicketInput("");
+    setAddTicketError(null);
+  }
+
+  async function submitAddTicket() {
+    if (!plan || !addTicketModalDayDate) {
+      return;
+    }
+
+    const ticketKey = addTicketInput.trim().toUpperCase();
+    if (!ticketKey) {
+      setAddTicketError("Enter a ticket key, for example PROJ-123.");
+      return;
+    }
+
+    const day = plan.days.find((item) => item.date === addTicketModalDayDate);
+    if (!day) {
+      setAddTicketError("Selected day is no longer available.");
+      return;
+    }
+
+    const alreadyExists = day.entries.some(
+      (entry) => entry.issue_key.toUpperCase() === ticketKey,
+    );
+    if (alreadyExists) {
+      setAddTicketError(`Ticket ${ticketKey} is already present for this day.`);
+      return;
+    }
+
+    setAddingTicketDayDate(addTicketModalDayDate);
+    setAddTicketError(null);
+    try {
+      const resp = await fetch("/api/day/tickets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date: addTicketModalDayDate,
+          issue_key: ticketKey,
+          timezone: plan.timezone,
+        }),
+      });
+      if (!resp.ok) {
+        throw new Error(await responseDetail(resp));
+      }
+
+      const newEntry = (await resp.json()) as DayPlan["entries"][number];
+      setPlan((current) => {
+        if (!current) return current;
+        const days = current.days.map((currentDay) => {
+          if (currentDay.date !== addTicketModalDayDate) {
+            return currentDay;
+          }
+          const duplicate = currentDay.entries.some(
+            (entry) => entry.issue_key === newEntry.issue_key,
+          );
+          if (duplicate) {
+            return currentDay;
+          }
+          const entries = [...currentDay.entries, newEntry];
+          const total_minutes = entries
+            .filter((entry) => !entry.removed)
+            .reduce((acc, entry) => acc + entry.minutes, 0);
+          return {
+            ...currentDay,
+            entries,
+            total_minutes,
+          };
+        });
+        return { ...current, days };
+      });
+
+      setAccordionOpen((prev) => ({ ...prev, [addTicketModalDayDate]: true }));
+      logActivity([
+        {
+          kind: "info",
+          message: `${addTicketModalDayDate} · ${ticketKey} added to day plan.`,
+        },
+      ]);
+      setAddTicketModalDayDate(null);
+      setAddTicketInput("");
+      setAddTicketError(null);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Could not add ticket to this day.";
+      setAddTicketError(message);
+      logActivity([{ kind: "error", message }]);
+    } finally {
+      setAddingTicketDayDate(null);
+    }
+  }
+
   async function logout() {
     setAuthLoading(true);
     setError(null);
@@ -1271,6 +1393,27 @@ export default function App() {
                     onClick={(e) => e.stopPropagation()}
                   >
                     <button
+                      className="day-add-btn"
+                      title="Add ticket to this day"
+                      aria-label="Add ticket"
+                      disabled={isDayBusy}
+                      onClick={() => openAddTicketModal(day.date)}
+                    >
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M12 5v14M5 12h14" />
+                      </svg>
+                    </button>
+                    <button
                       className="day-refresh-btn"
                       title="Refresh this day"
                       aria-label="Refresh day"
@@ -1371,7 +1514,12 @@ export default function App() {
                               </td>
                             </tr>
                           )}
-                          {day.entries.map((entry, entryIndex) => (
+                          {day.entries.map((entry, entryIndex) => {
+                            const issueBrowseUrl = buildIssueBrowseUrl(
+                              authStatus?.jira_base_url,
+                              entry.issue_key,
+                            );
+                            return (
                             <tr
                               key={`${entry.date}-${entry.issue_key}-${entryIndex}`}
                               className={[
@@ -1384,7 +1532,20 @@ export default function App() {
                                 .filter(Boolean)
                                 .join(" ")}
                             >
-                              <td className="col-ticket">{entry.issue_key}</td>
+                              <td className="col-ticket">
+                                {issueBrowseUrl ? (
+                                  <a
+                                    className="ticket-link"
+                                    href={issueBrowseUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                  >
+                                    {entry.issue_key}
+                                  </a>
+                                ) : (
+                                  entry.issue_key
+                                )}
+                              </td>
                               <td>
                                 <IssueTypeIcon type={entry.issue_type} />
                               </td>
@@ -1477,7 +1638,8 @@ export default function App() {
                                 </button>
                               </td>
                             </tr>
-                          ))}
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>
@@ -1487,6 +1649,84 @@ export default function App() {
           })}
         </section>
       )}
+
+      {addTicketModalDayDate && (
+        <button
+          type="button"
+          className="manual-ticket-backdrop"
+          aria-label="Close add ticket modal"
+          onClick={() => closeAddTicketModal()}
+        />
+      )}
+
+      <section
+        className={`manual-ticket-modal${addTicketModalDayDate ? " open" : ""}`}
+        aria-label="Add ticket to day"
+        aria-hidden={!addTicketModalDayDate}
+      >
+        <header className="manual-ticket-header">
+          <div>
+            <p className="activity-kicker">Manual Ticket</p>
+            <h2>
+              Add ticket{addTicketModalDayDate ? ` for ${addTicketModalDayDate}` : ""}
+            </h2>
+          </div>
+          <button
+            type="button"
+            className="ghost manual-ticket-close"
+            aria-label="Close add ticket modal"
+            onClick={() => closeAddTicketModal()}
+            disabled={Boolean(addingTicketDayDate)}
+          >
+            ×
+          </button>
+        </header>
+        <form
+          className="manual-ticket-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submitAddTicket();
+          }}
+        >
+          <label htmlFor="manual-ticket-input">Ticket key</label>
+          <input
+            id="manual-ticket-input"
+            type="text"
+            value={addTicketInput}
+            placeholder="PROJ-123"
+            onChange={(e) => setAddTicketInput(e.target.value)}
+            autoFocus
+            disabled={Boolean(addingTicketDayDate)}
+          />
+          <p className="manual-ticket-help">
+            Press Enter or use Add Ticket.
+          </p>
+          {addTicketError && <p className="day-submit-error">{addTicketError}</p>}
+          <div className="manual-ticket-actions">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => closeAddTicketModal()}
+              disabled={Boolean(addingTicketDayDate)}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="secondary"
+              disabled={Boolean(addingTicketDayDate)}
+            >
+              {addingTicketDayDate ? (
+                <>
+                  <span className="spinner spinner--sm" aria-hidden="true" /> Add Ticket...
+                </>
+              ) : (
+                "Add Ticket"
+              )}
+            </button>
+          </div>
+        </form>
+      </section>
 
       {exportModalOpen && (
         <button

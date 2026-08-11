@@ -27,6 +27,7 @@ from jira_tracking_bot.models import Issue, WorklogEntry
 from jira_tracking_bot.session_auth import SessionAuthError
 from jira_tracking_bot.session_auth import delete_browser_session, login_with_browser_session_web, session_summary
 from jira_tracking_bot.web.schemas import (
+    DayAddTicketRequest,
     DayPlan,
     DayPlanEntry,
     DayRefreshRequest,
@@ -61,6 +62,7 @@ _configure_logging()
 
 SEARCH_CONCURRENCY = 5
 WORKLOG_CONCURRENCY = 10
+ISSUE_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-[0-9]+$")
 
 
 def _env_truthy(name: str, default: bool) -> bool:
@@ -173,6 +175,7 @@ def auth_status() -> dict[str, object]:
         "session_path": str(config.session_state_path),
         "session_exists": bool(summary.get("exists")),
         "cookies": int(summary.get("cookies", 0)),
+        "jira_base_url": config.jira_base_url,
     }
 
 
@@ -1035,6 +1038,105 @@ async def refresh_day(payload: DayRefreshRequest) -> DayPlan:
         client.close()
 
     return result_day
+
+
+@app.post("/api/day/tickets", response_model=DayPlanEntry)
+async def add_day_ticket(payload: DayAddTicketRequest) -> DayPlanEntry:
+    try:
+        target_date = date.fromisoformat(payload.date)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid date '{payload.date}': {exc}") from exc
+
+    if target_date.weekday() >= 5:
+        raise HTTPException(status_code=400, detail=f"Day {payload.date} is a weekend; adding tickets is only supported for weekdays.")
+
+    issue_key = payload.issue_key.strip().upper()
+    if not ISSUE_KEY_PATTERN.match(issue_key):
+        raise HTTPException(status_code=422, detail="Invalid ticket key format. Expected format like PROJ-123.")
+
+    try:
+        config = load_config()
+        client = JiraClient(config)
+    except (ConfigError, SessionAuthError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        await asyncio.to_thread(client.validate_auth)
+
+        issues = await asyncio.to_thread(client.search_issues, jql=f'key = "{issue_key}"', max_results=1)
+        issue = next((item for item in issues if item.key.upper() == issue_key), None)
+        if issue is None:
+            raise HTTPException(status_code=404, detail=f"Ticket {issue_key} was not found in Jira.")
+
+        current_user_id: str | None = None
+        try:
+            current_user_id = await asyncio.to_thread(client.get_current_user_account_id)
+        except JiraClientError:
+            pass
+
+        existing: dict[tuple[str, date], tuple[int, int | None]] = {}
+        if current_user_id:
+            issue_key_worklogs, worklogs = await _fetch_issue_worklogs_async(
+                client,
+                issue.key,
+                asyncio.Semaphore(1),
+            )
+            issue_worklogs_by_key = {issue_key_worklogs: worklogs}
+
+            tempo_worklogs: list[dict] = []
+            try:
+                _uid = current_user_id
+                tempo_worklogs = await asyncio.to_thread(
+                    lambda: client.get_tempo_worklogs_for_user(
+                        account_id=_uid,
+                        from_date=target_date,
+                        to_date=target_date,
+                    )
+                )
+            except JiraClientError:
+                pass
+
+            existing = _build_existing_map_from_raw(
+                current_user_id,
+                issue_worklogs_by_key,
+                tempo_worklogs,
+                target_date,
+                target_date,
+                {issue.key},
+            )
+
+        existing_result = existing.get((issue.key, target_date))
+        if existing_result is not None:
+            existing_minutes, worklog_id = existing_result
+            return DayPlanEntry(
+                date=target_date,
+                issue_key=issue.key,
+                issue_type=issue.issue_type,
+                summary=issue.summary,
+                status=issue.status,
+                minutes=existing_minutes,
+                source="logged",
+                locked=False,
+                removed=False,
+                worklog_id=worklog_id,
+            )
+
+        return DayPlanEntry(
+            date=target_date,
+            issue_key=issue.key,
+            issue_type=issue.issue_type,
+            summary=issue.summary,
+            status=issue.status,
+            minutes=0,
+            source="generated-manual",
+            locked=False,
+            removed=False,
+            worklog_id=None,
+        )
+    except JiraClientError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        client.close()
 
 
 def _daily_seed_for_issues(
