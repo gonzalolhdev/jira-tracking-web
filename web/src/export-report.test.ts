@@ -136,6 +136,49 @@ describe("buildInitialExportDays", () => {
     ]);
     expect(merged.items[merged.folders.done.itemIds[0]].checked).toBe(false);
   });
+
+  it("builds export lines from logged entries only", () => {
+    const plan: MonthPlan = {
+      month: "2026-04",
+      timezone: "UTC",
+      days: [
+        {
+          date: "2026-04-01",
+          total_minutes: 480,
+          entries: [
+            {
+              date: "2026-04-01",
+              issue_key: "PROJ-100",
+              issue_type: "Story",
+              summary: "Already logged",
+              status: "Done",
+              minutes: 480,
+              source: "logged",
+              locked: false,
+              removed: false,
+            },
+            {
+              date: "2026-04-01",
+              issue_key: "PROJ-200",
+              issue_type: "Story",
+              summary: "Planned but not logged",
+              status: "In Progress",
+              minutes: 0,
+              source: "generated",
+              locked: false,
+              removed: false,
+            },
+          ],
+        },
+      ],
+    };
+
+    const [day] = buildInitialExportDays(plan, []);
+    const labels = Object.values(day.items).map((item) => item.label);
+
+    expect(labels).toContain("PROJ-100: Already logged");
+    expect(labels).not.toContain("PROJ-200: Planned but not logged");
+  });
 });
 
 describe("buildExportTextOutput", () => {

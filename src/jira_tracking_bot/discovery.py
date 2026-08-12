@@ -82,6 +82,24 @@ def build_jql_for_day_secondary_snapshot(config: AppConfig, day: date) -> str | 
     return " AND ".join(clauses) + " ORDER BY updated DESC"
 
 
+def build_jql_for_month_worklog_tickets(config: AppConfig, start_day: date, end_day: date) -> str:
+    """Build JQL for issues with user worklogs inside a month date range."""
+    start_str = start_day.strftime("%Y-%m-%d")
+    end_str = end_day.strftime("%Y-%m-%d")
+
+    clauses: list[str] = [
+        "worklogAuthor = currentUser()",
+        f'worklogDate >= "{start_str}"',
+        f'worklogDate <= "{end_str}"',
+    ]
+
+    if config.default_projects:
+        quoted = ", ".join(_quote_jql_literal(project) for project in config.default_projects)
+        clauses.append(f"project in ({quoted})")
+
+    return " AND ".join(clauses) + " ORDER BY updated DESC"
+
+
 def _quote_jql_literal(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'

@@ -20,7 +20,11 @@ from pydantic import BaseModel
 
 from jira_tracking_bot.balancing import DAILY_TARGET_MINUTES, rebalance_day, rebalance_month
 from jira_tracking_bot.config import ConfigError, load_config
-from jira_tracking_bot.discovery import build_jql_for_day_secondary_snapshot, build_jql_for_day_snapshot
+from jira_tracking_bot.discovery import (
+    build_jql_for_day_secondary_snapshot,
+    build_jql_for_day_snapshot,
+    build_jql_for_month_worklog_tickets,
+)
 from jira_tracking_bot.heuristics.git_signals import suggest_minutes_from_git
 from jira_tracking_bot.jira_client import JiraClient, JiraClientError
 from jira_tracking_bot.models import Issue, WorklogEntry
@@ -62,6 +66,7 @@ _configure_logging()
 
 SEARCH_CONCURRENCY = 5
 WORKLOG_CONCURRENCY = 10
+WORKLOG_PREFETCH_PAGE_SIZE = 100
 ISSUE_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-[0-9]+$")
 
 
@@ -260,6 +265,155 @@ async def _fetch_issue_worklogs_async(
             return issue_key, []
 
 
+def _build_logged_day_plan_from_existing(
+    day: date,
+    existing: dict[tuple[str, date], tuple[int, int | None]],
+    issue_lookup: dict[str, Issue],
+) -> DayPlan:
+    day_items = [
+        (issue_key, minutes, worklog_id)
+        for (issue_key, issue_day), (minutes, worklog_id) in existing.items()
+        if issue_day == day and minutes > 0
+    ]
+    day_items.sort(key=lambda item: item[0])
+
+    entries: list[DayPlanEntry] = []
+    for issue_key, minutes, worklog_id in day_items:
+        issue = issue_lookup.get(issue_key)
+        entries.append(
+            DayPlanEntry(
+                date=day,
+                issue_key=issue_key,
+                issue_type=issue.issue_type if issue else "Unknown",
+                summary=issue.summary if issue else "",
+                status=issue.status if issue else "Unknown",
+                minutes=minutes,
+                source="logged",
+                locked=False,
+                removed=False,
+                worklog_id=worklog_id,
+            )
+        )
+
+    return DayPlan(date=day, entries=entries, total_minutes=sum(e.minutes for e in entries))
+
+
+async def _prefetch_month_logged_context(
+    client: JiraClient,
+    config: object,
+    weekdays: list[date],
+) -> tuple[
+    str | None,
+    list[dict],
+    dict[str, Issue],
+    dict[str, list[dict]],
+    dict[tuple[str, date], tuple[int, int | None]],
+    set[date],
+]:
+    """Prefetch month worklog issues and derive fully-logged weekdays.
+
+    Returns:
+    - current_user_id
+    - tempo_worklogs
+    - prefetched_issues_by_key
+    - prefetched_issue_worklogs_by_key
+    - existing_prefetched map (issue, day) -> (minutes, worklog_id)
+    - fully_logged_days (sum logged minutes >= 8h)
+    """
+    if not weekdays:
+        return None, [], {}, {}, {}, set()
+
+    current_user_id: str | None = None
+    try:
+        current_user_id = await asyncio.to_thread(client.get_current_user_account_id)
+    except JiraClientError:
+        pass
+
+    if not current_user_id:
+        return None, [], {}, {}, {}, set()
+
+    tempo_worklogs: list[dict] = []
+    try:
+        _uid = current_user_id
+        tempo_worklogs = await asyncio.to_thread(
+            lambda: client.get_tempo_worklogs_for_user(
+                account_id=_uid,
+                from_date=weekdays[0],
+                to_date=weekdays[-1],
+            )
+        )
+    except JiraClientError:
+        pass
+
+    prefetched_issues: list[Issue] = []
+    prefetched_total = 0
+    month_worklog_jql = build_jql_for_month_worklog_tickets(config, weekdays[0], weekdays[-1])  # type: ignore[arg-type]
+    try:
+        prefetched_issues, prefetched_total = await asyncio.to_thread(
+            client.search_issues_page,
+            jql=month_worklog_jql,
+            max_results=WORKLOG_PREFETCH_PAGE_SIZE,
+            start_at=0,
+        )
+    except JiraClientError:
+        prefetched_issues = []
+
+    prefetched_issues_by_key = {issue.key: issue for issue in _dedupe_issues_by_key(prefetched_issues)}
+    if prefetched_total > len(prefetched_issues_by_key):
+        logger.warning(
+            "month_worklog_prefetch_truncated fetched=%s total=%s page_size=%s",
+            len(prefetched_issues_by_key),
+            prefetched_total,
+            WORKLOG_PREFETCH_PAGE_SIZE,
+        )
+
+    prefetched_issue_worklogs_by_key: dict[str, list[dict]] = {}
+    if prefetched_issues_by_key:
+        wl_semaphore = asyncio.Semaphore(WORKLOG_CONCURRENCY)
+        wl_tasks = [
+            _fetch_issue_worklogs_async(client, issue_key, wl_semaphore)
+            for issue_key in prefetched_issues_by_key
+        ]
+        wl_results = await asyncio.gather(*wl_tasks)
+        prefetched_issue_worklogs_by_key = dict(wl_results)
+
+    existing_prefetched: dict[tuple[str, date], tuple[int, int | None]] = {}
+    if prefetched_issues_by_key:
+        existing_prefetched = _build_existing_map_from_raw(
+            current_user_id,
+            prefetched_issue_worklogs_by_key,
+            tempo_worklogs,
+            weekdays[0],
+            weekdays[-1],
+            set(prefetched_issues_by_key.keys()),
+        )
+
+    logged_minutes_by_day: dict[date, int] = defaultdict(int)
+    for (_issue_key, issue_day), (minutes, _worklog_id) in existing_prefetched.items():
+        logged_minutes_by_day[issue_day] += minutes
+
+    fully_logged_days = {
+        day
+        for day, logged_minutes in logged_minutes_by_day.items()
+        if logged_minutes >= DAILY_TARGET_MINUTES
+    }
+
+    logger.info(
+        "month_worklog_prefetch_done issues=%s fully_logged_days=%s",
+        len(prefetched_issues_by_key),
+        len(fully_logged_days),
+    )
+
+    return (
+        current_user_id,
+        tempo_worklogs,
+        prefetched_issues_by_key,
+        prefetched_issue_worklogs_by_key,
+        existing_prefetched,
+        fully_logged_days,
+    )
+
+
 @app.get("/api/month/plan", response_model=MonthPlanResponse)
 async def get_month_plan(repo_path: str = ".", month: str | None = None) -> MonthPlanResponse:
     t0 = _time.monotonic()
@@ -294,15 +448,28 @@ async def get_month_plan(repo_path: str = ".", month: str | None = None) -> Mont
         client.close()
         return MonthPlanResponse(month=month_key, timezone=config.timezone, days=[])
 
-    # Parallel primary JQL searches for all weekdays
-    t_search = _time.monotonic()
-    search_semaphore = asyncio.Semaphore(SEARCH_CONCURRENCY)
-    search_tasks = [_search_day_async(client, config, day, search_semaphore) for day in weekdays]
-    search_results = await asyncio.gather(*search_tasks)
-    logger.info("jql_searches_done days=%s elapsed=%.2fs", len(weekdays), _time.monotonic() - t_search)
+    (
+        current_user_id,
+        tempo_worklogs,
+        prefetched_issues_by_key,
+        prefetched_issue_worklogs_by_key,
+        existing_prefetched,
+        fully_logged_days,
+    ) = await _prefetch_month_logged_context(client, config, weekdays)
 
-    day_issues: dict[date, list[Issue]] = {}
-    all_issues: dict[str, Issue] = {}
+    query_weekdays = [day for day in weekdays if day not in fully_logged_days]
+
+    # Parallel primary JQL searches only for weekdays that still need planning.
+    search_results: list[tuple[date, list[Issue], str | None]] = []
+    if query_weekdays:
+        t_search = _time.monotonic()
+        search_semaphore = asyncio.Semaphore(SEARCH_CONCURRENCY)
+        search_tasks = [_search_day_async(client, config, day, search_semaphore) for day in query_weekdays]
+        search_results = await asyncio.gather(*search_tasks)
+        logger.info("jql_searches_done days=%s elapsed=%.2fs", len(query_weekdays), _time.monotonic() - t_search)
+
+    day_issues: dict[date, list[Issue]] = {day: [] for day in weekdays}
+    all_issues: dict[str, Issue] = {issue.key: issue for issue in prefetched_issues_by_key.values()}
     query_errors: list[str] = []
 
     for day, issues, error in search_results:
@@ -314,14 +481,14 @@ async def get_month_plan(repo_path: str = ".", month: str | None = None) -> Mont
             for issue in issues:
                 all_issues[issue.key] = issue
 
-    if query_errors and len(query_errors) == len(weekdays):
+    if query_weekdays and query_errors and len(query_errors) == len(query_weekdays):
         client.close()
         raise HTTPException(status_code=400, detail=f"Month query failed for all weekdays. First error: {query_errors[0]}")
 
-    # Secondary query: add tickets not already found by primary, with 0 min default
-    if config.secondary_tracking_statuses:
+    # Secondary query: add tickets not already found by primary, with 0 min default.
+    if config.secondary_tracking_statuses and query_weekdays:
         sec_semaphore = asyncio.Semaphore(SEARCH_CONCURRENCY)
-        sec_tasks = [_search_day_secondary_async(client, config, day, sec_semaphore) for day in weekdays]
+        sec_tasks = [_search_day_secondary_async(client, config, day, sec_semaphore) for day in query_weekdays]
         sec_results = await asyncio.gather(*sec_tasks)
         for day, sec_issues, _ in sec_results:
             existing_day = day_issues.get(day, [])
@@ -336,63 +503,48 @@ async def get_month_plan(repo_path: str = ".", month: str | None = None) -> Mont
     all_issues_list = list(all_issues.values())
     issue_daily_seed = _daily_seed_for_issues(all_issues_list, suggestions, len(weekdays))
 
-    # Parallel worklog fetches
+    # Parallel worklog fetches for non-prefetched issues only.
     t_worklogs = _time.monotonic()
-    current_user_id: str | None = None
-    try:
-        current_user_id = await asyncio.to_thread(client.get_current_user_account_id)
-    except JiraClientError:
-        pass
+    issue_worklogs_by_key: dict[str, list[dict]] = dict(prefetched_issue_worklogs_by_key)
+    existing: dict[tuple[str, date], tuple[int, int | None]] = dict(existing_prefetched)
 
-    issue_worklogs_by_key: dict[str, list[dict]] = {}
     if current_user_id and all_issues_list:
-        wl_semaphore = asyncio.Semaphore(WORKLOG_CONCURRENCY)
-        wl_tasks = [_fetch_issue_worklogs_async(client, issue.key, wl_semaphore) for issue in all_issues_list]
-        wl_results = await asyncio.gather(*wl_tasks)
-        issue_worklogs_by_key = dict(wl_results)
+        missing_issue_keys = [
+            issue.key for issue in all_issues_list if issue.key not in issue_worklogs_by_key
+        ]
+        if missing_issue_keys:
+            wl_semaphore = asyncio.Semaphore(WORKLOG_CONCURRENCY)
+            wl_tasks = [_fetch_issue_worklogs_async(client, issue_key, wl_semaphore) for issue_key in missing_issue_keys]
+            wl_results = await asyncio.gather(*wl_tasks)
+            fetched_missing = dict(wl_results)
+            issue_worklogs_by_key.update(fetched_missing)
 
-    tempo_worklogs: list[dict] = []
-    if current_user_id:
-        try:
-            _uid = current_user_id
-            tempo_worklogs = await asyncio.to_thread(
-                lambda: client.get_tempo_worklogs_for_user(
-                    account_id=_uid,
-                    from_date=weekdays[0],
-                    to_date=weekdays[-1],
-                )
+            extra_existing = _build_existing_map_from_raw(
+                current_user_id,
+                fetched_missing,
+                tempo_worklogs,
+                weekdays[0],
+                weekdays[-1],
+                set(missing_issue_keys),
             )
-        except JiraClientError:
-            pass
+            existing.update(extra_existing)
 
     logger.info(
         "worklog_fetches_done issues=%s elapsed=%.2fs",
         len(all_issues_list),
         _time.monotonic() - t_worklogs,
     )
-    logger.info(
-        "existing_worklogs_tempo_raw count=%s sample=%s",
-        len(tempo_worklogs),
-        tempo_worklogs[:5],
-    )
 
-    existing: dict[tuple[str, date], tuple[int, int | None]] = {}
-    if current_user_id:
-        existing = _build_existing_map_from_raw(
-            current_user_id,
-            issue_worklogs_by_key,
-            tempo_worklogs,
-            weekdays[0],
-            weekdays[-1],
-            {issue.key for issue in all_issues_list},
-        )
-
-    primary_keys_by_day: dict[date, set[str]] = {}
+    primary_keys_by_day: dict[date, set[str]] = {day: set() for day in weekdays}
     for primary_day, issues, _err in search_results:
         primary_keys_by_day[primary_day] = {issue.key for issue in issues}
 
     days: list[DayPlan] = []
     for day in weekdays:
+        if day in fully_logged_days:
+            days.append(_build_logged_day_plan_from_existing(day, existing, all_issues))
+            continue
+
         entries: list[DayPlanEntry] = []
         primary_day_keys = primary_keys_by_day.get(day, set())
         for issue in day_issues.get(day, []):
@@ -519,44 +671,42 @@ async def stream_month_plan(repo_path: str = ".", month: str | None = None) -> S
             yield f"event: complete\ndata: {payload}\n\n"
             return
 
-        # Fetch current user and Tempo worklogs once upfront (single API calls)
-        current_user_id: str | None = None
-        try:
-            current_user_id = await asyncio.to_thread(client.get_current_user_account_id)
-        except JiraClientError:
-            pass
+        (
+            current_user_id,
+            tempo_worklogs,
+            prefetched_issues_by_key,
+            prefetched_issue_worklogs_by_key,
+            existing_prefetched,
+            fully_logged_days,
+        ) = await _prefetch_month_logged_context(client, config, weekdays)
 
-        tempo_worklogs: list[dict] = []
-        if current_user_id:
-            try:
-                _uid = current_user_id
-                tempo_worklogs = await asyncio.to_thread(
-                    lambda: client.get_tempo_worklogs_for_user(
-                        account_id=_uid,
-                        from_date=weekdays[0],
-                        to_date=weekdays[-1],
-                    )
-                )
-            except JiraClientError:
-                pass
+        query_weekdays = [day for day in weekdays if day not in fully_logged_days]
 
-        logger.info(
-            "stream existing_worklogs_tempo_raw count=%s sample=%s",
-            len(tempo_worklogs),
-            tempo_worklogs[:3],
-        )
-
-        all_day_issues: dict[date, list[Issue]] = {}
-        all_issues_accumulated: dict[str, Issue] = {}
-        primary_keys_accumulated: set[str] = set()
-        existing_global: dict[tuple[str, date], tuple[int, int | None]] = {}
+        all_day_issues: dict[date, list[Issue]] = {day: [] for day in weekdays}
+        all_issues_accumulated: dict[str, Issue] = {issue.key: issue for issue in prefetched_issues_by_key.values()}
+        existing_global: dict[tuple[str, date], tuple[int, int | None]] = dict(existing_prefetched)
+        issue_worklogs_cache: dict[str, list[dict]] = dict(prefetched_issue_worklogs_by_key)
         all_days: list[DayPlan] = []
         query_errors: list[str] = []
         ready_emitted_dates: set[date] = set()
 
-        # ── Phase 1: primary JQL batches ────────────────────────────────────
-        for batch_start in range(0, len(weekdays), SEARCH_CONCURRENCY):
-            batch = weekdays[batch_start : batch_start + SEARCH_CONCURRENCY]
+        skipped_days = [day for day in weekdays if day in fully_logged_days]
+        if skipped_days:
+            skipped_plans = [
+                _build_logged_day_plan_from_existing(day, existing_global, all_issues_accumulated)
+                for day in skipped_days
+            ]
+            all_days.extend(skipped_plans)
+            skipped_chunk_payload = json.dumps({"days": [_serialize_day_plan(d) for d in skipped_plans]})
+            yield f"event: chunk\ndata: {skipped_chunk_payload}\n\n"
+
+            for day in skipped_days:
+                ready_emitted_dates.add(day)
+                ready_payload = json.dumps({"date": day.isoformat()})
+                yield f"event: day-ready\ndata: {ready_payload}\n\n"
+
+        for batch_start in range(0, len(query_weekdays), SEARCH_CONCURRENCY):
+            batch = query_weekdays[batch_start : batch_start + SEARCH_CONCURRENCY]
 
             t_batch = _time.monotonic()
             semaphore = asyncio.Semaphore(SEARCH_CONCURRENCY)
@@ -565,34 +715,34 @@ async def stream_month_plan(repo_path: str = ".", month: str | None = None) -> S
 
             batch_issues: dict[str, Issue] = {}
             for day, issues, error in search_results:
-                if not error:
-                    all_day_issues[day] = issues
-                    for issue in issues:
-                        batch_issues[issue.key] = issue
-                        all_issues_accumulated[issue.key] = issue
-                        primary_keys_accumulated.add(issue.key)
-                else:
+                if error:
                     query_errors.append(f"{day.isoformat()}: {error}")
                     all_day_issues[day] = []
+                    continue
 
-            batch_worklogs: dict[str, list[dict]] = {}
-            if current_user_id and batch_issues:
-                wl_semaphore = asyncio.Semaphore(WORKLOG_CONCURRENCY)
-                wl_tasks = [_fetch_issue_worklogs_async(client, ik, wl_semaphore) for ik in batch_issues]
-                wl_results = await asyncio.gather(*wl_tasks)
-                batch_worklogs = dict(wl_results)
+                all_day_issues[day] = issues
+                for issue in issues:
+                    batch_issues[issue.key] = issue
+                    all_issues_accumulated[issue.key] = issue
 
-            existing: dict[tuple[str, date], tuple[int, int | None]] = {}
             if current_user_id and batch_issues:
-                existing = _build_existing_map_from_raw(
-                    current_user_id,
-                    batch_worklogs,
-                    tempo_worklogs,
-                    batch[0],
-                    batch[-1],
-                    set(batch_issues.keys()),
-                )
-                existing_global.update(existing)
+                missing_batch_keys = [key for key in batch_issues if key not in issue_worklogs_cache]
+                if missing_batch_keys:
+                    wl_semaphore = asyncio.Semaphore(WORKLOG_CONCURRENCY)
+                    wl_tasks = [_fetch_issue_worklogs_async(client, issue_key, wl_semaphore) for issue_key in missing_batch_keys]
+                    wl_results = await asyncio.gather(*wl_tasks)
+                    fetched_missing = dict(wl_results)
+                    issue_worklogs_cache.update(fetched_missing)
+
+                    existing_batch = _build_existing_map_from_raw(
+                        current_user_id,
+                        fetched_missing,
+                        tempo_worklogs,
+                        batch[0],
+                        batch[-1],
+                        set(fetched_missing.keys()),
+                    )
+                    existing_global.update(existing_batch)
 
             all_issues_list = list(all_issues_accumulated.values())
             issue_daily_seed = _daily_seed_for_issues(all_issues_list, suggestions, len(weekdays))
@@ -601,7 +751,7 @@ async def stream_month_plan(repo_path: str = ".", month: str | None = None) -> S
             for day in batch:
                 entries: list[DayPlanEntry] = []
                 for issue in all_day_issues.get(day, []):
-                    existing_result = existing.get((issue.key, day))
+                    existing_result = existing_global.get((issue.key, day))
                     if existing_result is not None:
                         existing_minutes, worklog_id = existing_result
                         entries.append(
@@ -648,7 +798,6 @@ async def stream_month_plan(repo_path: str = ".", month: str | None = None) -> S
             chunk_payload = json.dumps({"days": [_serialize_day_plan(d) for d in batch_days]})
             yield f"event: chunk\ndata: {chunk_payload}\n\n"
 
-            # Without secondary tracking, each day is complete after phase 1.
             if not config.secondary_tracking_statuses:
                 for day in batch:
                     if day in ready_emitted_dates:
@@ -657,30 +806,26 @@ async def stream_month_plan(repo_path: str = ".", month: str | None = None) -> S
                     ready_payload = json.dumps({"date": day.isoformat()})
                     yield f"event: day-ready\ndata: {ready_payload}\n\n"
 
-        if query_errors and len(query_errors) == len(weekdays):
+        if query_weekdays and query_errors and len(query_errors) == len(query_weekdays):
             client.close()
             detail = f"Month query failed for all weekdays. First error: {query_errors[0]}"
             yield f"event: error\ndata: {json.dumps({'detail': detail})}\n\n"
             return
 
-        # ── Phase 2: secondary enrichment batches ────────────────────────────
         if config.secondary_tracking_statuses:
-            # Map date → DayPlan for mutation
-            day_plan_by_date: dict[date, DayPlan] = {d.date: d for d in all_days}
+            day_plan_by_date: dict[date, DayPlan] = {day_plan.date: day_plan for day_plan in all_days}
 
-            for batch_start in range(0, len(weekdays), SEARCH_CONCURRENCY):
-                batch = weekdays[batch_start : batch_start + SEARCH_CONCURRENCY]
+            for batch_start in range(0, len(query_weekdays), SEARCH_CONCURRENCY):
+                batch = query_weekdays[batch_start : batch_start + SEARCH_CONCURRENCY]
 
                 sec_semaphore = asyncio.Semaphore(SEARCH_CONCURRENCY)
                 sec_tasks = [_search_day_secondary_async(client, config, day, sec_semaphore) for day in batch]
                 sec_results = await asyncio.gather(*sec_tasks)
 
-                # Collect newly discovered secondary issues, filtered per-day
-                # against that day's primary feed so duplicates are not appended.
                 new_secondary_by_day: dict[date, list[Issue]] = {}
                 new_secondary_keys: set[str] = set()
                 for day, sec_issues, _ in sec_results:
-                    existing_keys = {i.key for i in all_day_issues.get(day, [])}
+                    existing_keys = {issue.key for issue in all_day_issues.get(day, [])}
                     filtered = [issue for issue in sec_issues if issue.key not in existing_keys]
                     if not filtered:
                         continue
@@ -688,90 +833,88 @@ async def stream_month_plan(repo_path: str = ".", month: str | None = None) -> S
                     new_secondary_by_day[day] = filtered
                     all_day_issues[day] = all_day_issues.get(day, []) + filtered
                     for issue in filtered:
-                        if issue.key not in all_issues_accumulated:
-                            all_issues_accumulated[issue.key] = issue
+                        all_issues_accumulated[issue.key] = issue
                         new_secondary_keys.add(issue.key)
 
-                if not new_secondary_keys:
-                    continue
-
-                # Fetch worklogs for newly found secondary issues
-                sec_worklogs: dict[str, list[dict]] = {}
-                if current_user_id:
+                missing_secondary_keys = [key for key in new_secondary_keys if key not in issue_worklogs_cache]
+                if current_user_id and missing_secondary_keys:
                     wl_semaphore = asyncio.Semaphore(WORKLOG_CONCURRENCY)
-                    wl_tasks = [_fetch_issue_worklogs_async(client, ik, wl_semaphore) for ik in new_secondary_keys]
-                    wl_results_list = await asyncio.gather(*wl_tasks)
-                    sec_worklogs = dict(wl_results_list)
+                    wl_tasks = [_fetch_issue_worklogs_async(client, issue_key, wl_semaphore) for issue_key in missing_secondary_keys]
+                    wl_results = await asyncio.gather(*wl_tasks)
+                    fetched_missing = dict(wl_results)
+                    issue_worklogs_cache.update(fetched_missing)
 
-                sec_existing: dict[tuple[str, date], tuple[int, int | None]] = {}
-                if current_user_id and new_secondary_keys:
                     sec_existing = _build_existing_map_from_raw(
                         current_user_id,
-                        sec_worklogs,
+                        fetched_missing,
                         tempo_worklogs,
                         batch[0],
                         batch[-1],
-                        new_secondary_keys,
+                        set(fetched_missing.keys()),
                     )
                     existing_global.update(sec_existing)
 
                 updated_batch_days: list[DayPlan] = []
                 for day in batch:
-                    newly_added = new_secondary_by_day.get(day, [])
-                    if not newly_added:
-                        continue
-
                     existing_plan = day_plan_by_date.get(day)
                     existing_entries = list(existing_plan.entries) if existing_plan else []
+                    newly_added = new_secondary_by_day.get(day, [])
 
-                    for issue in newly_added:
-                        existing_result = existing_global.get((issue.key, day))
-                        if existing_result is not None:
-                            existing_minutes, worklog_id = existing_result
-                            existing_entries.append(DayPlanEntry(
-                                date=day,
-                                issue_key=issue.key,
-                                issue_type=issue.issue_type,
-                                summary=issue.summary,
-                                status=issue.status,
-                                minutes=existing_minutes,
-                                source="logged",
-                                locked=False,
-                                removed=False,
-                                worklog_id=worklog_id,
-                            ))
-                        else:
-                            existing_entries.append(DayPlanEntry(
-                                date=day,
-                                issue_key=issue.key,
-                                issue_type=issue.issue_type,
-                                summary=issue.summary,
-                                status=issue.status,
-                                minutes=0,
-                                source="generated-secondary",
-                                locked=False,
-                                removed=False,
-                                worklog_id=None,
-                            ))
+                    if newly_added:
+                        for issue in newly_added:
+                            existing_result = existing_global.get((issue.key, day))
+                            if existing_result is not None:
+                                existing_minutes, worklog_id = existing_result
+                                existing_entries.append(
+                                    DayPlanEntry(
+                                        date=day,
+                                        issue_key=issue.key,
+                                        issue_type=issue.issue_type,
+                                        summary=issue.summary,
+                                        status=issue.status,
+                                        minutes=existing_minutes,
+                                        source="logged",
+                                        locked=False,
+                                        removed=False,
+                                        worklog_id=worklog_id,
+                                    )
+                                )
+                            else:
+                                existing_entries.append(
+                                    DayPlanEntry(
+                                        date=day,
+                                        issue_key=issue.key,
+                                        issue_type=issue.issue_type,
+                                        summary=issue.summary,
+                                        status=issue.status,
+                                        minutes=0,
+                                        source="generated-secondary",
+                                        locked=False,
+                                        removed=False,
+                                        worklog_id=None,
+                                    )
+                                )
 
-                    updated_plan = rebalance_day(DayPlan(
-                        date=day,
-                        entries=existing_entries,
-                        total_minutes=sum(e.minutes for e in existing_entries),
-                    ))
+                    updated_plan = rebalance_day(
+                        DayPlan(
+                            date=day,
+                            entries=existing_entries,
+                            total_minutes=sum(entry.minutes for entry in existing_entries),
+                        )
+                    )
                     day_plan_by_date[day] = updated_plan
-                    # Replace in all_days list
-                    for idx, d in enumerate(all_days):
-                        if d.date == day:
+                    for idx, item in enumerate(all_days):
+                        if item.date == day:
                             all_days[idx] = updated_plan
                             break
+                    else:
+                        all_days.append(updated_plan)
                     updated_batch_days.append(updated_plan)
 
-                if updated_batch_days:
+                if updated_batch_days and any(day in new_secondary_by_day for day in batch):
                     chunk_payload = json.dumps({"days": [_serialize_day_plan(d) for d in updated_batch_days]})
                     yield f"event: chunk\ndata: {chunk_payload}\n\n"
 
-                # With secondary tracking enabled, a day is complete after its phase-2 batch.
                 for day in batch:
                     if day in ready_emitted_dates:
                         continue
@@ -780,7 +923,8 @@ async def stream_month_plan(repo_path: str = ".", month: str | None = None) -> S
                     yield f"event: day-ready\ndata: {ready_payload}\n\n"
 
         # ── Final: rebalance and complete ────────────────────────────────────
-        balanced_days = rebalance_month(all_days)
+        all_days_sorted = sorted(all_days, key=lambda day_plan: day_plan.date)
+        balanced_days = rebalance_month(all_days_sorted)
         complete_payload = json.dumps({
             "month": month_key,
             "timezone": config.timezone,

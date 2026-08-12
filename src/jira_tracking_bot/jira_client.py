@@ -89,6 +89,48 @@ class JiraClient:
                 issues.append(Issue(key=key, issue_type=issue_type, summary=summary, status=status, issue_id=str(issue_id) if issue_id else None))
         return issues
 
+    def search_issues_page(self, *, jql: str, max_results: int = 100, start_at: int = 0) -> tuple[list[Issue], int]:
+        """Search Jira issues returning one page and the server-reported total."""
+        query = urlencode(
+            {
+                "jql": jql,
+                "startAt": start_at,
+                "maxResults": max_results,
+                "fields": "summary,issuetype,status",
+            }
+        )
+        response = self._request("GET", f"/search?{query}")
+        self._ensure_ok(response, "Jira search failed")
+
+        payload = response.json()
+        total_raw = payload.get("total", 0)
+        try:
+            total = int(total_raw)
+        except (TypeError, ValueError):
+            total = 0
+
+        issues_raw = payload.get("issues", [])
+        issues: list[Issue] = []
+        for issue_raw in issues_raw:
+            fields = issue_raw.get("fields", {})
+            issue_type = fields.get("issuetype", {}).get("name", "Unknown")
+            status = fields.get("status", {}).get("name", "Unknown")
+            summary = fields.get("summary", "")
+            key = issue_raw.get("key", "")
+            issue_id = issue_raw.get("id")
+            if key:
+                issues.append(
+                    Issue(
+                        key=key,
+                        issue_type=issue_type,
+                        summary=summary,
+                        status=status,
+                        issue_id=str(issue_id) if issue_id else None,
+                    )
+                )
+
+        return issues, total
+
     def get_issue_worklogs(self, issue_key: str) -> list[dict]:
         worklogs: list[dict] = []
         start_at = 0
