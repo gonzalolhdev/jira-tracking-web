@@ -1089,6 +1089,85 @@ tr.secondary-zero .issue-type-badge {
   background: rgba(244, 196, 48, 0.16);
 }
 
+/* Submit to Productive button */
+.submit-productive-btn {
+  border-color: rgba(74, 222, 128, 0.35);
+  color: #b7f8d1;
+  background: rgba(74, 222, 128, 0.08);
+}
+
+.submit-productive-btn:hover:not(:disabled) {
+  border-color: rgba(74, 222, 128, 0.7);
+  background: rgba(74, 222, 128, 0.18);
+}
+
+.submit-productive-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Edit button for logged days */
+.edit-productive-btn {
+  border-color: rgba(168, 85, 247, 0.35);
+  color: #d6a8ff;
+  background: rgba(168, 85, 247, 0.08);
+}
+
+.edit-productive-btn:hover:not(:disabled) {
+  border-color: rgba(168, 85, 247, 0.7);
+  background: rgba(168, 85, 247, 0.18);
+}
+
+/* Logged day card subtle tint */
+.export-day-logged {
+  border-color: rgba(74, 222, 128, 0.22);
+}
+
+/* Productive read-only rich text inside the accordion */
+.export-productive-entry {
+  padding: 10px;
+}
+
+.export-productive-richtext {
+  border-color: rgba(74, 222, 128, 0.22);
+  background: rgba(10, 22, 14, 0.55);
+}
+
+/* Edit mode info banner */
+.export-edit-mode-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 6px 10px 0;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  background: rgba(168, 85, 247, 0.08);
+  font-size: 0.72rem;
+  color: #d6a8ff;
+}
+
+.export-edit-mode-banner button {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  padding: 3px 8px;
+}
+
+/* Productive status hint in export modal intro */
+.productive-status-hint {
+  font-size: 0.75rem;
+  color: var(--ink-1);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* Productive error message in export modal */
+.export-productive-error {
+  margin: 0 0 10px;
+}
+
 .export-day-body {
   padding: 10px;
   display: grid;

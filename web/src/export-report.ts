@@ -301,10 +301,9 @@ export function buildExportTextOutput(day: ExportDayReport): ExportTextOutput {
   }
 
   const html = `<div>\n${sections
-    .map((section, index) => {
+    .map((section) => {
       const listItems = section.items.map((item) => `    <li><p>${escapeHtml(item.label)}</p></li>`).join("\n");
-      const spacer = index < sections.length - 1 ? "\n  <br />" : "";
-      return `  <p>${escapeHtml(section.label)}:</p>\n  <ul>\n${listItems}\n  </ul>${spacer}`;
+      return `  <p>${escapeHtml(section.label)}:</p>\n  <ul>\n${listItems}\n  </ul>`;
     })
     .join("\n")}
 </div>`;

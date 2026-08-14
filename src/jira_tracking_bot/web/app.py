@@ -19,7 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from jira_tracking_bot.balancing import DAILY_TARGET_MINUTES, rebalance_day, rebalance_month
-from jira_tracking_bot.config import ConfigError, load_config
+from jira_tracking_bot.config import ConfigError, load_config, load_productive_config
 from jira_tracking_bot.discovery import (
     build_jql_for_day_secondary_snapshot,
     build_jql_for_day_snapshot,
@@ -28,6 +28,7 @@ from jira_tracking_bot.discovery import (
 from jira_tracking_bot.heuristics.git_signals import suggest_minutes_from_git
 from jira_tracking_bot.jira_client import JiraClient, JiraClientError
 from jira_tracking_bot.models import Issue, WorklogEntry
+from jira_tracking_bot.productive_client import ProductiveClient, ProductiveClientError
 from jira_tracking_bot.session_auth import SessionAuthError
 from jira_tracking_bot.session_auth import delete_browser_session, login_with_browser_session_web, session_summary
 from jira_tracking_bot.web.schemas import (
@@ -1526,6 +1527,126 @@ def _dedupe_issues_by_key(issues: list[Issue]) -> list[Issue]:
             deduped[issue.key] = issue
     return list(deduped.values())
 
+
+
+
+
+# ── Productive.io integration ─────────────────────────────────────────────────
+
+
+class CreateProductiveEntryRequest(BaseModel):
+    date: str          # YYYY-MM-DD
+    html: str          # Rich text HTML note
+    time_minutes: int = 480
+
+
+class ProductiveTimeEntryResponse(BaseModel):
+    id: str
+    date: str
+    time: int
+    note: str
+    service_id: str | None = None
+
+
+class ProductiveEntriesResponse(BaseModel):
+    available: bool
+    entries: list[ProductiveTimeEntryResponse]
+
+
+def _get_productive_client() -> ProductiveClient | None:
+    cfg = load_productive_config()
+    if not cfg:
+        return None
+    return ProductiveClient(base_url=cfg.base_url, token=cfg.token, org_id=cfg.org_id)
+
+
+@app.get("/api/productive/time-entries", response_model=ProductiveEntriesResponse)
+async def get_productive_entries(month: str | None = None) -> ProductiveEntriesResponse:
+    client = _get_productive_client()
+    if not client:
+        return ProductiveEntriesResponse(available=False, entries=[])
+
+    try:
+        config = load_config(require_auth=False)
+        req_year, req_month_num = _parse_month_param(month, config.tzinfo)
+    except (ConfigError, HTTPException):
+        from datetime import datetime as _dt
+        now = _dt.now()
+        req_year, req_month_num = now.year, now.month
+
+    import calendar
+    last_day = calendar.monthrange(req_year, req_month_num)[1]
+    after = f"{req_year}-{req_month_num:02d}-01"
+    before = f"{req_year}-{req_month_num:02d}-{last_day:02d}"
+
+    try:
+        entries = await asyncio.to_thread(client.get_time_entries, after=after, before=before)
+    except ProductiveClientError as exc:
+        logger.warning("productive_get_entries_failed: %s", exc)
+        return ProductiveEntriesResponse(available=True, entries=[])
+
+    return ProductiveEntriesResponse(
+        available=True,
+        entries=[
+            ProductiveTimeEntryResponse(
+                id=e.id,
+                date=e.date,
+                time=e.time,
+                note=e.note,
+                service_id=e.service_id,
+            )
+            for e in entries
+        ],
+    )
+
+
+@app.post("/api/productive/time-entries", response_model=ProductiveTimeEntryResponse)
+async def create_productive_entry(payload: CreateProductiveEntryRequest) -> ProductiveTimeEntryResponse:
+    client = _get_productive_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Productive integration is not configured.")
+
+    try:
+        target_date = date.fromisoformat(payload.date)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid date '{payload.date}': {exc}") from exc
+
+    try:
+        person_id = await asyncio.to_thread(client.get_my_person_id)
+        if not person_id:
+            raise HTTPException(status_code=400, detail="Could not determine your Productive person ID.")
+
+        service_id = await asyncio.to_thread(
+            client.get_service_id_for_date, person_id, target_date.isoformat()
+        )
+        if not service_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No service found for this date. "
+                    "Make sure you have a booking scheduled on this date in Productive, "
+                    "or that you have at least one past time entry."
+                ),
+            )
+
+        entry = await asyncio.to_thread(
+            client.create_time_entry,
+            person_id,
+            service_id,
+            target_date.isoformat(),
+            payload.html,
+            payload.time_minutes,
+        )
+    except ProductiveClientError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return ProductiveTimeEntryResponse(
+        id=entry.id,
+        date=entry.date,
+        time=entry.time,
+        note=entry.note,
+        service_id=entry.service_id,
+    )
 
 
 def run() -> None:

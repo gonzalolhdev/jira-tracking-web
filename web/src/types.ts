@@ -44,3 +44,16 @@ export type StreamDayReadyEvent = {
 };
 
 export type StreamCompleteEvent = MonthPlan;
+
+export type ProductiveTimeEntry = {
+  id: string;
+  date: string;
+  time: number;
+  note: string;
+  service_id: string | null;
+};
+
+export type ProductiveEntriesResponse = {
+  available: boolean;
+  entries: ProductiveTimeEntry[];
+};

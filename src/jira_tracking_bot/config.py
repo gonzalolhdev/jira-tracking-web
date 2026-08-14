@@ -13,6 +13,7 @@ CONFIG_ENV_PREFIX = "JIRA_TRACK_"
 DEFAULT_CONFIG_PATH = Path.home() / ".jira-track.json"
 PROJECT_CONFIG_PATH = Path(".jira-track.json")
 PROJECT_ENV_PATH = Path(".env")
+PRODUCTIVE_ENV_PATH = Path(".env.productive")
 DEFAULT_SESSION_STATE_PATH = Path(".jira-track/session.json")
 
 
@@ -47,6 +48,30 @@ class AppConfig:
         except Exception as exc:  # pragma: no cover
             raise ConfigError(f"Invalid timezone: {self.timezone}") from exc
 
+
+
+@dataclass(slots=True)
+class ProductiveConfig:
+    base_url: str
+    token: str
+    org_id: str
+
+
+def load_productive_config() -> ProductiveConfig | None:
+    """Load Productive API config from .env.productive or environment variables.
+
+    Returns ``None`` when the required variables are not present.
+    """
+    _load_env_file(Path.cwd() / PRODUCTIVE_ENV_PATH)
+
+    base_url = os.getenv("PRODUCTIVE_BASE_URL", "https://api.productive.io/api/v2")
+    token = os.getenv("PRODUCTIVE_TOKEN")
+    org_id = os.getenv("PRODUCTIVE_ORG_ID")
+
+    if not token or not org_id:
+        return None
+
+    return ProductiveConfig(base_url=base_url, token=token, org_id=org_id)
 
 
 def load_config(config_path: str | None = None, require_auth: bool = True) -> AppConfig:
@@ -118,8 +143,7 @@ def _resolve_config_path(config_path: str | None) -> Path:
     return DEFAULT_CONFIG_PATH
 
 
-def _load_project_env_file() -> None:
-    env_path = Path.cwd() / PROJECT_ENV_PATH
+def _load_env_file(env_path: Path) -> None:
     if not env_path.exists():
         return
 
@@ -133,6 +157,10 @@ def _load_project_env_file() -> None:
         value = value.strip().strip('"').strip("'")
         if key and key not in os.environ:
             os.environ[key] = value
+
+
+def _load_project_env_file() -> None:
+    _load_env_file(Path.cwd() / PROJECT_ENV_PATH)
 
 
 

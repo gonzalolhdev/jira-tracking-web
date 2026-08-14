@@ -211,6 +211,15 @@ describe("buildExportTextOutput", () => {
     expect(output.plainText).not.toContain("Done:");
     expect(output.html).not.toContain("Meetings");
   });
+
+  it("does not insert an explicit line break between sections", () => {
+    const [day] = buildInitialExportDays(makePlan(), [{ id: "meetings", description: "Meetings", defaultEnabled: true }]);
+
+    const output = buildExportTextOutput(day);
+
+    expect(output.html).not.toContain("<br />");
+    expect(output.html).not.toContain("<br/>");
+  });
 });
 
 describe("persistence helpers", () => {

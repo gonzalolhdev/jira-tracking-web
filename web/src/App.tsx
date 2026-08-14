@@ -16,6 +16,8 @@ import {
 import {
   DayPlan,
   MonthPlan,
+  ProductiveEntriesResponse,
+  ProductiveTimeEntry,
   StreamChunkEvent,
   StreamCompleteEvent,
   StreamDayReadyEvent,
@@ -318,6 +320,15 @@ export default function App() {
     folderKey: ExportFolderKey;
     beforeItemId: string | null;
   } | null>(null);
+
+  // Productive integration state
+  const [productiveEntries, setProductiveEntries] = useState<Record<string, ProductiveTimeEntry>>({});
+  const [productiveAvailable, setProductiveAvailable] = useState(false);
+  const [productiveLoading, setProductiveLoading] = useState(false);
+  const [productiveError, setProductiveError] = useState<string | null>(null);
+  // Days switched to "edit/pending" mode locally (even though they have a productive entry)
+  const [exportEditModeDates, setExportEditModeDates] = useState<Set<string>>(new Set());
+  const [submittingToProductiveDate, setSubmittingToProductiveDate] = useState<string | null>(null);
 
   useEffect(() => {
     void bootstrap();
@@ -1015,12 +1026,87 @@ export default function App() {
     setExportAccordionOpen(
       exportReports[0] ? { [exportReports[0].date]: true } : {},
     );
+    setExportEditModeDates(new Set());
     setExportModalOpen(true);
+    void loadProductiveEntries();
+  }
+
+  async function loadProductiveEntries() {
+    setProductiveLoading(true);
+    setProductiveError(null);
+    try {
+      const url = selectedMonth
+        ? `/api/productive/time-entries?month=${encodeURIComponent(selectedMonth)}`
+        : "/api/productive/time-entries";
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        throw new Error(await responseDetail(resp));
+      }
+      const data = (await resp.json()) as ProductiveEntriesResponse;
+      setProductiveAvailable(data.available);
+      if (data.available) {
+        const byDate: Record<string, ProductiveTimeEntry> = {};
+        for (const entry of data.entries) {
+          byDate[entry.date] = entry;
+        }
+        setProductiveEntries(byDate);
+      }
+    } catch (err) {
+      setProductiveError(err instanceof Error ? err.message : "Could not load Productive entries.");
+    } finally {
+      setProductiveLoading(false);
+    }
+  }
+
+  async function submitDayToProductive(date: string) {
+    const day = exportReports.find((r) => r.date === date);
+    if (!day) return;
+
+    const output = buildExportTextOutput(day);
+    setSubmittingToProductiveDate(date);
+    setProductiveError(null);
+    try {
+      const resp = await fetch("/api/productive/time-entries", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ date, html: output.html, time_minutes: 480 }),
+      });
+      if (!resp.ok) {
+        throw new Error(await responseDetail(resp));
+      }
+      const entry = (await resp.json()) as ProductiveTimeEntry;
+      setProductiveEntries((prev) => ({ ...prev, [date]: entry }));
+      setExportEditModeDates((prev) => {
+        const next = new Set(prev);
+        next.delete(date);
+        return next;
+      });
+      logActivity([{ kind: "success", message: `${date} submitted to Productive.io.` }]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Submit to Productive failed.";
+      setProductiveError(message);
+      logActivity([{ kind: "error", message }]);
+    } finally {
+      setSubmittingToProductiveDate(null);
+    }
+  }
+
+  function enterExportEditMode(date: string) {
+    setExportEditModeDates((prev) => new Set([...prev, date]));
+  }
+
+  function exitExportEditMode(date: string) {
+    setExportEditModeDates((prev) => {
+      const next = new Set(prev);
+      next.delete(date);
+      return next;
+    });
   }
 
   function closeExportModal() {
     setPreviewDayDate(null);
     setExportModalView("reports");
+    setExportEditModeDates(new Set());
     setExportModalOpen(false);
   }
 
@@ -1778,15 +1864,31 @@ export default function App() {
         {exportModalView === "reports" ? (
           <>
             <p className="export-modal-copy">
-              Each day has rich text output ready to copy.
+              Each day has rich text output ready to copy.{" "}
+              {productiveAvailable && (
+                <span className="productive-status-hint">
+                  {productiveLoading ? (
+                    <><span className="spinner spinner--sm" aria-hidden="true" /> Checking Productive…</>
+                  ) : (
+                    "Productive.io integration active."
+                  )}
+                </span>
+              )}
             </p>
+            {productiveError && (
+              <p className="day-submit-error export-productive-error">{productiveError}</p>
+            )}
 
             <div className="export-days">
               {exportReports.map((day) => {
                 const isOpen = exportAccordionOpen[day.date] ?? false;
+                const productiveEntry = productiveEntries[day.date] ?? null;
+                const isLoggedInProductive = productiveAvailable && productiveEntry !== null && !exportEditModeDates.has(day.date);
+                const isPendingMode = !isLoggedInProductive;
+                const isSubmitting = submittingToProductiveDate === day.date;
                 return (
                   <article
-                    className={`export-day${isOpen ? " open" : ""}`}
+                    className={`export-day${isOpen ? " open" : ""}${isLoggedInProductive ? " export-day-logged" : ""}`}
                     key={day.date}
                   >
                     <header
@@ -1809,270 +1911,332 @@ export default function App() {
                           ▶
                         </span>
                         <h3>{day.heading}</h3>
+                        {productiveAvailable && !productiveLoading && (
+                          <span
+                            className={`day-status-badge ${isLoggedInProductive ? "badge-logged" : "badge-pending"}`}
+                          >
+                            {isLoggedInProductive ? "logged" : "pending"}
+                          </span>
+                        )}
                       </div>
                       <div
                         className="export-day-actions"
                         onClick={(e) => e.stopPropagation()}
                       >
-                        <button
-                          type="button"
-                          className="copy-day-btn preview-day-btn"
-                          onClick={() => setPreviewDayDate(day.date)}
-                        >
-                          Preview
-                        </button>
-                        <button
-                          type="button"
-                          className={`copy-day-btn${copiedExportDayDate === day.date ? " copied" : ""}`}
-                          onClick={() => {
-                            void copyExportDay(day.date);
-                          }}
-                        >
-                          {copiedExportDayDate === day.date
-                            ? "Copied"
-                            : "Copy Day"}
-                        </button>
+                        {isPendingMode && (
+                          <>
+                            <button
+                              type="button"
+                              className="copy-day-btn preview-day-btn"
+                              onClick={() => setPreviewDayDate(day.date)}
+                            >
+                              Preview
+                            </button>
+                            <button
+                              type="button"
+                              className={`copy-day-btn${copiedExportDayDate === day.date ? " copied" : ""}`}
+                              onClick={() => { void copyExportDay(day.date); }}
+                            >
+                              {copiedExportDayDate === day.date ? "Copied" : "Copy Day"}
+                            </button>
+                            {productiveAvailable && (
+                              <button
+                                type="button"
+                                className="copy-day-btn submit-productive-btn"
+                                disabled={isSubmitting}
+                                onClick={() => { void submitDayToProductive(day.date); }}
+                              >
+                                {isSubmitting ? (
+                                  <><span className="spinner spinner--sm" aria-hidden="true" /> Submitting…</>
+                                ) : (
+                                  "Submit Day"
+                                )}
+                              </button>
+                            )}
+                          </>
+                        )}
+                        {isLoggedInProductive && (
+                          <>
+                            <button
+                              type="button"
+                              className="copy-day-btn preview-day-btn"
+                              onClick={() => setPreviewDayDate(day.date)}
+                            >
+                              Preview
+                            </button>
+                            <button
+                              type="button"
+                              className="copy-day-btn edit-productive-btn"
+                              onClick={() => enterExportEditMode(day.date)}
+                            >
+                              Edit
+                            </button>
+                          </>
+                        )}
                       </div>
                     </header>
                     {isOpen && (
                       <div className="export-day-body">
-                        {(["inProgress", "done"] as ExportFolderKey[]).map(
-                          (folderKey) => {
-                            const folder = day.folders[folderKey];
-                            const checkedChildren = folder.itemIds.filter(
-                              (itemId) => day.items[itemId]?.checked,
-                            ).length;
-                            return (
-                              <section
-                                className={`export-folder${folder.checked ? "" : " is-muted"}`}
-                                key={folder.key}
-                              >
-                                <label
-                                  className={`export-row export-folder-row${folder.checked ? "" : " is-muted"}`}
+                        {isLoggedInProductive && productiveEntry ? (
+                          <div className="export-productive-entry">
+                            <div
+                              className="export-preview-richtext export-productive-richtext"
+                              dangerouslySetInnerHTML={{ __html: productiveEntry.note }}
+                            />
+                          </div>
+                        ) : (
+                          <>
+                            {productiveEntry && exportEditModeDates.has(day.date) && (
+                              <div className="export-edit-mode-banner">
+                                <span>Editing — submit will overwrite the existing Productive entry.</span>
+                                <button
+                                  type="button"
+                                  className="ghost"
+                                  onClick={() => exitExportEditMode(day.date)}
                                 >
-                                  <input
-                                    type="checkbox"
-                                    checked={folder.checked}
-                                    onChange={(e) =>
-                                      updateFolderChecked(
-                                        day.date,
-                                        folderKey,
-                                        e.target.checked,
-                                      )
-                                    }
-                                  />
-                                  <span className="export-folder-label">
-                                    {folder.label}
-                                  </span>
-                                  <span className="export-folder-count">
-                                    {checkedChildren}/{folder.itemIds.length}
-                                  </span>
-                                </label>
-                                <ul
-                                  className="export-folder-items"
-                                  onDragOver={(e) => {
-                                    const dragged =
-                                      draggedExportLineRef.current;
-                                    if (!dragged || dragged.date !== day.date) {
-                                      return;
-                                    }
-                                    e.preventDefault();
-                                    e.dataTransfer.dropEffect = "move";
-                                    if (folder.itemIds.length === 0) {
-                                      setExportDragDropHint({
-                                        date: day.date,
-                                        folderKey,
-                                        beforeItemId: null,
-                                      });
-                                    }
-                                  }}
-                                  onDragLeave={(e) => {
-                                    if (
-                                      e.target === e.currentTarget &&
-                                      folder.itemIds.length === 0
-                                    ) {
-                                      setExportDragDropHint(null);
-                                    }
-                                  }}
-                                  onDrop={(e) => {
-                                    e.preventDefault();
-                                    const dragged =
-                                      draggedExportLineRef.current;
-                                    if (
-                                      !dragged ||
-                                      dragged.date !== day.date ||
-                                      dragged.itemId ===
-                                        folder.itemIds[folder.itemIds.length - 1]
-                                    ) {
-                                      return;
-                                    }
-                                    if (folder.itemIds.length === 0) {
-                                      moveExportLineBetweenFolders(
-                                        day.date,
-                                        dragged.folderKey,
-                                        folderKey,
-                                        dragged.itemId,
-                                        null,
-                                      );
-                                    }
-                                    draggedExportLineRef.current = null;
-                                    setExportDragDropHint(null);
-                                  }}
+                                  Cancel
+                                </button>
+                              </div>
+                            )}
+                          {(["inProgress", "done"] as ExportFolderKey[]).map(
+                            (folderKey) => {
+                              const folder = day.folders[folderKey];
+                              const checkedChildren = folder.itemIds.filter(
+                                (itemId) => day.items[itemId]?.checked,
+                              ).length;
+                              return (
+                                <section
+                                  className={`export-folder${folder.checked ? "" : " is-muted"}`}
+                                  key={folder.key}
                                 >
-                                  {folder.itemIds.length === 0 ? (
-                                    <li
-                                      className={`export-folder-empty${exportDragDropHint?.folderKey === folderKey && exportDragDropHint?.date === day.date ? " is-drop-target" : ""}`}
-                                    >
-                                      No entries.
-                                    </li>
-                                  ) : (
-                                    folder.itemIds
-                                      .map((itemId, itemIndex) => {
-                                        const item = day.items[itemId];
-                                        if (!item) {
-                                          return null;
-                                        }
-                                        const isMuted =
-                                          !folder.checked || !item.checked;
-                                        const isDropTarget =
-                                          exportDragDropHint?.date ===
-                                            day.date &&
-                                          exportDragDropHint?.beforeItemId ===
-                                            itemId &&
-                                          exportDragDropHint?.folderKey ===
-                                            folderKey;
-                                        const isDragSource =
-                                          draggedExportLineRef.current?.itemId ===
-                                            itemId &&
-                                          draggedExportLineRef.current?.folderKey ===
-                                            folderKey;
-                                        return (
-                                          <li
-                                            key={item.id}
-                                            className={`export-item-shell${isMuted ? " is-muted" : ""}${isDropTarget ? " is-drop-target" : ""}${isDragSource ? " is-drag-source" : ""}`}
-                                            draggable
-                                            onDragStart={(e) => {
-                                              draggedExportLineRef.current = {
-                                                date: day.date,
-                                                folderKey,
-                                                itemId: item.id,
-                                              };
-                                              e.dataTransfer.effectAllowed =
-                                                "move";
-                                            }}
-                                            onDragOver={(e) => {
-                                              const dragged =
-                                                draggedExportLineRef.current;
-                                              if (
-                                                !dragged ||
-                                                dragged.date !== day.date ||
-                                                dragged.itemId === item.id
-                                              ) {
-                                                return;
-                                              }
-                                              e.preventDefault();
-                                              e.dataTransfer.dropEffect =
-                                                "move";
-                                              setExportDragDropHint({
-                                                date: day.date,
-                                                folderKey,
-                                                beforeItemId: item.id,
-                                              });
-                                            }}
-                                            onDrop={(e) => {
-                                              e.preventDefault();
-                                              const dragged =
-                                                draggedExportLineRef.current;
-                                              if (
-                                                !dragged ||
-                                                dragged.date !== day.date ||
-                                                dragged.itemId === item.id
-                                              ) {
-                                                return;
-                                              }
-                                              if (
-                                                dragged.folderKey === folderKey
-                                              ) {
-                                                moveExportLine(
-                                                  day.date,
-                                                  folderKey,
-                                                  dragged.itemId,
-                                                  item.id,
-                                                );
-                                              } else {
-                                                moveExportLineBetweenFolders(
-                                                  day.date,
-                                                  dragged.folderKey,
-                                                  folderKey,
-                                                  dragged.itemId,
-                                                  item.id,
-                                                );
-                                              }
-                                              draggedExportLineRef.current =
-                                                null;
-                                              setExportDragDropHint(null);
-                                            }}
-                                            onDragEnd={() => {
-                                              draggedExportLineRef.current =
-                                                null;
-                                              setExportDragDropHint(null);
-                                            }}
-                                          >
-                                            <label
-                                              className={`export-row export-item-row${isMuted ? " is-muted" : ""}`}
-                                            >
-                                              <span
-                                                className="export-drag-handle"
-                                                aria-hidden="true"
-                                              >
-                                                ⋮⋮
-                                              </span>
-                                              <input
-                                                type="checkbox"
-                                                checked={item.checked}
-                                                onChange={(e) =>
-                                                  updateLineChecked(
-                                                    day.date,
-                                                    item.id,
-                                                    e.target.checked,
-                                                  )
-                                                }
-                                              />
-                                              <span className="export-item-label">
-                                                {item.label}
-                                              </span>
-                                            </label>
-                                          </li>
+                                  <label
+                                    className={`export-row export-folder-row${folder.checked ? "" : " is-muted"}`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={folder.checked}
+                                      onChange={(e) =>
+                                        updateFolderChecked(
+                                          day.date,
+                                          folderKey,
+                                          e.target.checked,
+                                        )
+                                      }
+                                    />
+                                    <span className="export-folder-label">
+                                      {folder.label}
+                                    </span>
+                                    <span className="export-folder-count">
+                                      {checkedChildren}/{folder.itemIds.length}
+                                    </span>
+                                  </label>
+                                  <ul
+                                    className="export-folder-items"
+                                    onDragOver={(e) => {
+                                      const dragged =
+                                        draggedExportLineRef.current;
+                                      if (!dragged || dragged.date !== day.date) {
+                                        return;
+                                      }
+                                      e.preventDefault();
+                                      e.dataTransfer.dropEffect = "move";
+                                      if (folder.itemIds.length === 0) {
+                                        setExportDragDropHint({
+                                          date: day.date,
+                                          folderKey,
+                                          beforeItemId: null,
+                                        });
+                                      }
+                                    }}
+                                    onDragLeave={(e) => {
+                                      if (
+                                        e.target === e.currentTarget &&
+                                        folder.itemIds.length === 0
+                                      ) {
+                                        setExportDragDropHint(null);
+                                      }
+                                    }}
+                                    onDrop={(e) => {
+                                      e.preventDefault();
+                                      const dragged =
+                                        draggedExportLineRef.current;
+                                      if (
+                                        !dragged ||
+                                        dragged.date !== day.date ||
+                                        dragged.itemId ===
+                                          folder.itemIds[folder.itemIds.length - 1]
+                                      ) {
+                                        return;
+                                      }
+                                      if (folder.itemIds.length === 0) {
+                                        moveExportLineBetweenFolders(
+                                          day.date,
+                                          dragged.folderKey,
+                                          folderKey,
+                                          dragged.itemId,
+                                          null,
                                         );
-                                      })
-                                      .reduce(
-                                        (acc, elem, idx) => {
-                                          const dragged =
-                                            draggedExportLineRef.current;
-                                          if (
-                                            dragged?.date === day.date &&
-                                            dragged?.folderKey === folderKey &&
-                                            folder.itemIds[idx] ===
-                                              dragged.itemId
-                                          ) {
-                                            acc.push(
-                                              <li
-                                                key={`gap-${dragged.itemId}`}
-                                                className="export-gap-placeholder"
-                                                aria-hidden="true"
-                                              />
-                                            );
+                                      }
+                                      draggedExportLineRef.current = null;
+                                      setExportDragDropHint(null);
+                                    }}
+                                  >
+                                    {folder.itemIds.length === 0 ? (
+                                      <li
+                                        className={`export-folder-empty${exportDragDropHint?.folderKey === folderKey && exportDragDropHint?.date === day.date ? " is-drop-target" : ""}`}
+                                      >
+                                        No entries.
+                                      </li>
+                                    ) : (
+                                      folder.itemIds
+                                        .map((itemId, itemIndex) => {
+                                          const item = day.items[itemId];
+                                          if (!item) {
+                                            return null;
                                           }
-                                          if (elem) acc.push(elem);
-                                          return acc;
-                                        },
-                                        [] as React.ReactNode[],
-                                      )
-                                  )}
-                                </ul>
-                              </section>
-                            );
-                          },
+                                          const isMuted =
+                                            !folder.checked || !item.checked;
+                                          const isDropTarget =
+                                            exportDragDropHint?.date ===
+                                              day.date &&
+                                            exportDragDropHint?.beforeItemId ===
+                                              itemId &&
+                                            exportDragDropHint?.folderKey ===
+                                              folderKey;
+                                          const isDragSource =
+                                            draggedExportLineRef.current?.itemId ===
+                                              itemId &&
+                                            draggedExportLineRef.current?.folderKey ===
+                                              folderKey;
+                                          return (
+                                            <li
+                                              key={item.id}
+                                              className={`export-item-shell${isMuted ? " is-muted" : ""}${isDropTarget ? " is-drop-target" : ""}${isDragSource ? " is-drag-source" : ""}`}
+                                              draggable
+                                              onDragStart={(e) => {
+                                                draggedExportLineRef.current = {
+                                                  date: day.date,
+                                                  folderKey,
+                                                  itemId: item.id,
+                                                };
+                                                e.dataTransfer.effectAllowed =
+                                                  "move";
+                                              }}
+                                              onDragOver={(e) => {
+                                                const dragged =
+                                                  draggedExportLineRef.current;
+                                                if (
+                                                  !dragged ||
+                                                  dragged.date !== day.date ||
+                                                  dragged.itemId === item.id
+                                                ) {
+                                                  return;
+                                                }
+                                                e.preventDefault();
+                                                e.dataTransfer.dropEffect =
+                                                  "move";
+                                                setExportDragDropHint({
+                                                  date: day.date,
+                                                  folderKey,
+                                                  beforeItemId: item.id,
+                                                });
+                                              }}
+                                              onDrop={(e) => {
+                                                e.preventDefault();
+                                                const dragged =
+                                                  draggedExportLineRef.current;
+                                                if (
+                                                  !dragged ||
+                                                  dragged.date !== day.date ||
+                                                  dragged.itemId === item.id
+                                                ) {
+                                                  return;
+                                                }
+                                                if (
+                                                  dragged.folderKey === folderKey
+                                                ) {
+                                                  moveExportLine(
+                                                    day.date,
+                                                    folderKey,
+                                                    dragged.itemId,
+                                                    item.id,
+                                                  );
+                                                } else {
+                                                  moveExportLineBetweenFolders(
+                                                    day.date,
+                                                    dragged.folderKey,
+                                                    folderKey,
+                                                    dragged.itemId,
+                                                    item.id,
+                                                  );
+                                                }
+                                                draggedExportLineRef.current =
+                                                  null;
+                                                setExportDragDropHint(null);
+                                              }}
+                                              onDragEnd={() => {
+                                                draggedExportLineRef.current =
+                                                  null;
+                                                setExportDragDropHint(null);
+                                              }}
+                                            >
+                                              <label
+                                                className={`export-row export-item-row${isMuted ? " is-muted" : ""}`}
+                                              >
+                                                <span
+                                                  className="export-drag-handle"
+                                                  aria-hidden="true"
+                                                >
+                                                  ⋮⋮
+                                                </span>
+                                                <input
+                                                  type="checkbox"
+                                                  checked={item.checked}
+                                                  onChange={(e) =>
+                                                    updateLineChecked(
+                                                      day.date,
+                                                      item.id,
+                                                      e.target.checked,
+                                                    )
+                                                  }
+                                                />
+                                                <span className="export-item-label">
+                                                  {item.label}
+                                                </span>
+                                              </label>
+                                            </li>
+                                          );
+                                        })
+                                        .reduce(
+                                          (acc, elem, idx) => {
+                                            const dragged =
+                                              draggedExportLineRef.current;
+                                            if (
+                                              dragged?.date === day.date &&
+                                              dragged?.folderKey === folderKey &&
+                                              folder.itemIds[idx] ===
+                                                dragged.itemId
+                                            ) {
+                                              acc.push(
+                                                <li
+                                                  key={`gap-${dragged.itemId}`}
+                                                  className="export-gap-placeholder"
+                                                  aria-hidden="true"
+                                                />
+                                              );
+                                            }
+                                            if (elem) acc.push(elem);
+                                            return acc;
+                                          },
+                                          [] as React.ReactNode[],
+                                        )
+                                    )}
+                                  </ul>
+                                </section>
+                              );
+                            },
+                          )}
+                          </>
                         )}
                       </div>
                     )}
@@ -2161,12 +2325,19 @@ export default function App() {
             >
               ×
             </button>
-            <div
-              className="export-preview-richtext"
-              dangerouslySetInnerHTML={{
-                __html: buildExportTextOutput(previewDay).html,
-              }}
-            />
+            {productiveAvailable && productiveEntries[previewDay.date] && !exportEditModeDates.has(previewDay.date) ? (
+              <div
+                className="export-preview-richtext"
+                dangerouslySetInnerHTML={{ __html: productiveEntries[previewDay.date].note }}
+              />
+            ) : (
+              <div
+                className="export-preview-richtext"
+                dangerouslySetInnerHTML={{
+                  __html: buildExportTextOutput(previewDay).html,
+                }}
+              />
+            )}
           </section>
         </>
       ) : null}
