@@ -4,6 +4,8 @@ import asyncio
 from collections import defaultdict
 from collections.abc import AsyncGenerator
 from datetime import date, datetime, time, timedelta
+from html import escape as html_escape
+from html.parser import HTMLParser
 import json
 import logging
 import os
@@ -29,8 +31,6 @@ from jira_tracking_bot.heuristics.git_signals import suggest_minutes_from_git
 from jira_tracking_bot.jira_client import JiraClient, JiraClientError
 from jira_tracking_bot.models import Issue, WorklogEntry
 from jira_tracking_bot.productive_client import ProductiveClient, ProductiveClientError
-from jira_tracking_bot.session_auth import SessionAuthError
-from jira_tracking_bot.session_auth import delete_browser_session, login_with_browser_session_web, session_summary
 from jira_tracking_bot.web.schemas import (
     DayAddTicketRequest,
     DayPlan,
@@ -69,6 +69,109 @@ SEARCH_CONCURRENCY = 5
 WORKLOG_CONCURRENCY = 10
 WORKLOG_PREFETCH_PAGE_SIZE = 100
 ISSUE_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*-[0-9]+$")
+_PRODUCTIVE_ALLOWED_TAGS = {
+    "a",
+    "b",
+    "blockquote",
+    "br",
+    "code",
+    "div",
+    "em",
+    "i",
+    "li",
+    "ol",
+    "p",
+    "pre",
+    "span",
+    "strong",
+    "ul",
+}
+_PRODUCTIVE_DROP_CONTENT_TAGS = {"script", "style", "iframe", "object", "embed", "svg", "math"}
+_PRODUCTIVE_SAFE_HREF_SCHEMES = {"http", "https", "mailto"}
+
+
+def _is_safe_href(raw_href: str) -> bool:
+    href = raw_href.strip()
+    if not href or href.startswith("//"):
+        return False
+    if href.startswith(("/", "#")):
+        return True
+
+    parsed = urlparse(href)
+    if parsed.scheme and parsed.scheme.lower() not in _PRODUCTIVE_SAFE_HREF_SCHEMES:
+        return False
+
+    return True
+
+
+class _ProductiveHtmlSanitizer(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in _PRODUCTIVE_DROP_CONTENT_TAGS:
+            self._skip_depth += 1
+            return
+        if self._skip_depth or tag not in _PRODUCTIVE_ALLOWED_TAGS:
+            return
+        if tag == "br":
+            self._parts.append("<br />")
+            return
+
+        rendered_attrs: list[str] = []
+        if tag == "a":
+            attr_map = {name.lower(): value or "" for name, value in attrs}
+            href = attr_map.get("href", "").strip()
+            if href and _is_safe_href(href):
+                rendered_attrs.append(f' href="{html_escape(href, quote=True)}"')
+            title = attr_map.get("title", "").strip()
+            if title:
+                rendered_attrs.append(f' title="{html_escape(title, quote=True)}"')
+            target = attr_map.get("target", "").strip()
+            if target in {"_blank", "_self", "_parent", "_top"}:
+                rendered_attrs.append(f' target="{html_escape(target, quote=True)}"')
+                if target == "_blank":
+                    rendered_attrs.append(' rel="noreferrer noopener"')
+
+        self._parts.append(f"<{tag}{''.join(rendered_attrs)}>")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in _PRODUCTIVE_DROP_CONTENT_TAGS:
+            if self._skip_depth:
+                self._skip_depth -= 1
+            return
+        if self._skip_depth or tag not in _PRODUCTIVE_ALLOWED_TAGS or tag == "br":
+            return
+        self._parts.append(f"</{tag}>")
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip_depth:
+            self._parts.append(html_escape(data, quote=False))
+
+    def handle_entityref(self, name: str) -> None:
+        if not self._skip_depth:
+            self._parts.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if not self._skip_depth:
+            self._parts.append(f"&#{name};")
+
+    def handle_comment(self, data: str) -> None:
+        return
+
+    def get_html(self) -> str:
+        return "".join(self._parts)
+
+
+def sanitize_productive_html(raw_html: str) -> str:
+    sanitizer = _ProductiveHtmlSanitizer()
+    sanitizer.feed(raw_html)
+    sanitizer.close()
+    return sanitizer.get_html()
 
 
 def _env_truthy(name: str, default: bool) -> bool:
@@ -84,29 +187,6 @@ def _cors_origins() -> list[str]:
         return ["http://localhost:5173", "http://127.0.0.1:5173"]
     parsed = [origin.strip() for origin in raw.split(",") if origin.strip()]
     return parsed or ["http://localhost:5173", "http://127.0.0.1:5173"]
-
-
-def _cdp_allowed_hosts() -> set[str]:
-    raw = os.getenv("JIRA_TRACK_CDP_ALLOWED_HOSTS")
-    if raw is None:
-        return {"127.0.0.1", "localhost", "host.docker.internal"}
-    parsed = {host.strip().lower() for host in raw.split(",") if host.strip()}
-    return parsed or {"127.0.0.1", "localhost", "host.docker.internal"}
-
-
-def _validate_cdp_url(cdp_url: str) -> str:
-    parsed = urlparse(cdp_url.strip())
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise SessionAuthError("Invalid CDP URL. Expected format like http://127.0.0.1:9222")
-
-    allowed_hosts = _cdp_allowed_hosts()
-    if parsed.hostname.lower() not in allowed_hosts:
-        allowed = ", ".join(sorted(allowed_hosts))
-        raise SessionAuthError(
-            f"CDP URL host '{parsed.hostname}' is not allowed. Allowed hosts: {allowed}"
-        )
-
-    return cdp_url
 
 
 def _parse_month_param(month: str | None, tzinfo: object) -> tuple[int, int]:
@@ -174,43 +254,37 @@ def auth_status() -> dict[str, object]:
         config = load_config(require_auth=False)
     except ConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    token_configured = bool(config.jira_email and config.jira_token)
+    if not token_configured:
+        return {
+            "auth_mode": "api-token",
+            "token_configured": False,
+            "token_valid": False,
+            "validation_error": "Set JIRA_TRACK_JIRA_EMAIL and JIRA_TRACK_JIRA_TOKEN to continue.",
+            "jira_base_url": config.jira_base_url,
+        }
 
-    summary = session_summary(config.session_state_path)
+    client = JiraClient(config)
+    try:
+        client.validate_auth()
+    except JiraClientError as exc:
+        return {
+            "auth_mode": "api-token",
+            "token_configured": True,
+            "token_valid": False,
+            "validation_error": str(exc),
+            "jira_base_url": config.jira_base_url,
+        }
+    finally:
+        client.close()
+
     return {
-        "auth_mode": "sso",
-        "session_path": str(config.session_state_path),
-        "session_exists": bool(summary.get("exists")),
-        "cookies": int(summary.get("cookies", 0)),
+        "auth_mode": "api-token",
+        "token_configured": True,
+        "token_valid": True,
+        "validation_error": None,
         "jira_base_url": config.jira_base_url,
     }
-
-
-class LoginSsoRequest(BaseModel):
-    cdp_url: str | None = None
-
-
-@app.post("/api/auth/login-sso")
-def login_sso_web(payload: LoginSsoRequest | None = None) -> dict[str, str]:
-    try:
-        config = load_config(require_auth=False)
-        cdp_url = (payload.cdp_url if payload else None) or os.getenv("JIRA_TRACK_CDP_URL")
-        if cdp_url:
-            cdp_url = _validate_cdp_url(cdp_url)
-        session_path = login_with_browser_session_web(config, cdp_url=cdp_url)
-    except (ConfigError, SessionAuthError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return {"message": "SSO session saved", "session_path": str(session_path)}
-
-
-@app.post("/api/auth/logout")
-def logout_web() -> dict[str, str]:
-    try:
-        config = load_config(require_auth=False)
-        delete_browser_session(config)
-    except (ConfigError, SessionAuthError):
-        pass
-    return {"message": "Logged out"}
 
 
 async def _search_day_async(
@@ -421,7 +495,7 @@ async def get_month_plan(repo_path: str = ".", month: str | None = None) -> Mont
     try:
         config = load_config()
         client = JiraClient(config)
-    except (ConfigError, SessionAuthError) as exc:
+    except ConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     req_year, req_month_num = _parse_month_param(month, config.tzinfo)
@@ -635,7 +709,7 @@ async def stream_month_plan(repo_path: str = ".", month: str | None = None) -> S
         try:
             config = load_config()
             client = JiraClient(config)
-        except (ConfigError, SessionAuthError) as exc:
+        except ConfigError as exc:
             yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
             return
 
@@ -953,7 +1027,7 @@ def submit(payload: SubmitRequest) -> SubmitResponse:
     try:
         config = load_config()
         client = JiraClient(config)
-    except (ConfigError, SessionAuthError) as exc:
+    except ConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     results: list[SubmitItemResult] = []
@@ -1047,7 +1121,7 @@ async def refresh_day(payload: DayRefreshRequest) -> DayPlan:
     try:
         config = load_config()
         client = JiraClient(config)
-    except (ConfigError, SessionAuthError) as exc:
+    except ConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
@@ -1202,7 +1276,7 @@ async def add_day_ticket(payload: DayAddTicketRequest) -> DayPlanEntry:
     try:
         config = load_config()
         client = JiraClient(config)
-    except (ConfigError, SessionAuthError) as exc:
+    except ConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
@@ -1592,7 +1666,7 @@ async def get_productive_entries(month: str | None = None) -> ProductiveEntriesR
                 id=e.id,
                 date=e.date,
                 time=e.time,
-                note=e.note,
+                note=sanitize_productive_html(e.note),
                 service_id=e.service_id,
             )
             for e in entries
@@ -1612,6 +1686,7 @@ async def create_productive_entry(payload: CreateProductiveEntryRequest) -> Prod
         raise HTTPException(status_code=422, detail=f"Invalid date '{payload.date}': {exc}") from exc
 
     try:
+        sanitized_html = sanitize_productive_html(payload.html)
         person_id = await asyncio.to_thread(client.get_my_person_id)
         if not person_id:
             raise HTTPException(status_code=400, detail="Could not determine your Productive person ID.")
@@ -1634,7 +1709,7 @@ async def create_productive_entry(payload: CreateProductiveEntryRequest) -> Prod
             person_id,
             service_id,
             target_date.isoformat(),
-            payload.html,
+            sanitized_html,
             payload.time_minutes,
         )
     except ProductiveClientError as exc:
@@ -1644,7 +1719,7 @@ async def create_productive_entry(payload: CreateProductiveEntryRequest) -> Prod
         id=entry.id,
         date=entry.date,
         time=entry.time,
-        note=entry.note,
+        note=sanitize_productive_html(entry.note),
         service_id=entry.service_id,
     )
 
@@ -1654,9 +1729,8 @@ def run() -> None:
         config = load_config(require_auth=False)
         debug = config.debug
         logger.info(
-            "startup auth_mode=sso session_path=%s session_exists=%s log_level=%s debug=%s",
-            config.session_state_path,
-            config.has_sso_session,
+            "startup auth_mode=api-token token_configured=%s log_level=%s debug=%s",
+            config.has_jira_credentials,
             "DEBUG" if debug else "INFO",
             debug,
         )

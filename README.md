@@ -117,7 +117,7 @@ Open http://localhost:5173.
 ## Requirements
 
 - Python 3.11+
-- Jira web access through SSO in your browser (session-based auth)
+- Jira Cloud API token for your Atlassian account
 
 ## Setup
 
@@ -127,7 +127,6 @@ Open http://localhost:5173.
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -e .
-python3 -m playwright install chromium
 ```
 
 2. Recommended: use project-local environment file (keeps setup simple and explicit):
@@ -149,13 +148,12 @@ You can also use `~/.jira-track.json` if you want one shared config across repos
 You can override any config value with environment variables:
 
 - `JIRA_TRACK_JIRA_BASE_URL`
+- `JIRA_TRACK_JIRA_EMAIL`
+- `JIRA_TRACK_JIRA_TOKEN`
 - `JIRA_TRACK_TEMPO_API_TOKEN`
 - `JIRA_TRACK_TEMPO_API_BASE` (defaults to `https://api.tempo.io/4`)
 - `JIRA_TRACK_TIMEZONE` (defaults to `America/New_York`)
 - `JIRA_TRACK_DEFAULT_PROJECTS` (comma-separated, for example `PROJ,OPS,PLAT`)
-- `JIRA_TRACK_SESSION_STATE_PATH` (defaults to `.jira-track/session.json`)
-- `JIRA_TRACK_CDP_URL` (optional, for host Chrome CDP; example `http://host.docker.internal:9222`)
-- `JIRA_TRACK_CDP_ALLOWED_HOSTS` (comma-separated host allowlist, defaults to `127.0.0.1,localhost,host.docker.internal`)
 - `JIRA_TRACK_CORS_ORIGINS` (comma-separated allowed web origins)
 - `JIRA_TRACK_WEB_FORWARDED_ALLOW_IPS` (comma-separated trusted proxy IPs for forwarded headers, defaults to `127.0.0.1`)
 
@@ -189,52 +187,6 @@ Validate auth:
 jira-track auth-check
 ```
 
-Log in through browser SSO and save the session locally:
-
-```bash
-jira-track login-sso
-```
-
-Reuse an already-running Chrome session (so you can often avoid re-entering credentials):
-
-1. Start Chrome with remote debugging enabled:
-
-macOS:
-
-```bash
-open -na "Google Chrome" --args --remote-debugging-port=9222
-```
-
-Linux:
-
-```bash
-google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/jira-track-chrome
-```
-
-Windows (PowerShell):
-
-```powershell
-Start-Process chrome.exe "--remote-debugging-port=9222 --user-data-dir=$env:TEMP\jira-track-chrome"
-```
-
-WSL/WSL2 (launches Windows Chrome from WSL):
-
-```bash
-cmd.exe /C start "" "chrome.exe" --remote-debugging-port=9222 --user-data-dir="%TEMP%\\jira-track-chrome"
-```
-
-2. Run login using that browser session:
-
-```bash
-jira-track login-sso --cdp-url http://127.0.0.1:9222
-```
-
-Delete the saved SSO session:
-
-```bash
-jira-track logout-sso
-```
-
 Diagnose auth mode and endpoint reachability:
 
 ```bash
@@ -257,6 +209,6 @@ jira-track submit --period week --repo-path . --comment "Weekly log"
 
 - The tool searches issues assigned to `currentUser()` and updated in the selected period.
 - Suggested time is heuristic only; always review before confirming.
-- Authentication is SSO-only and uses a saved Playwright browser session.
-- If the browser can reach Jira but API requests fail, run `jira-track login-sso` again to refresh the saved session.
-- The saved browser session is stored locally in `.jira-track/session.json` by default and should be treated like a credential.
+- Authentication uses Jira Cloud API token credentials (`JIRA_TRACK_JIRA_EMAIL` and `JIRA_TRACK_JIRA_TOKEN`).
+- If API requests fail, verify token validity and account permissions for your Jira Cloud site.
+- Treat the Jira API token as a secret and rotate it immediately if it was exposed.

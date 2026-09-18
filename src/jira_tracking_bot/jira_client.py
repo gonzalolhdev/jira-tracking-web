@@ -8,7 +8,6 @@ import httpx
 
 from jira_tracking_bot.config import AppConfig
 from jira_tracking_bot.models import Issue, WorklogEntry
-from jira_tracking_bot.session_auth import SessionAuthError, request_with_browser_session
 
 
 logger = logging.getLogger(__name__)
@@ -21,10 +20,19 @@ class JiraClientError(RuntimeError):
 class JiraClient:
     def __init__(self, config: AppConfig, timeout_seconds: int = 20) -> None:
         self._base_url = config.jira_base_url
-        self._api_base = f"{self._base_url}/rest/api/2"
+        self._api_base = f"{self._base_url}/rest/api/3"
         self._tempo_api_base = config.tempo_api_base.rstrip("/")
         self._config = config
         self._timeout_seconds = timeout_seconds
+        self._jira_client: httpx.Client | None = None
+
+        if config.has_jira_credentials:
+            self._jira_client = httpx.Client(
+                base_url=self._api_base,
+                headers={"Accept": "application/json"},
+                auth=(config.jira_email, config.jira_token),
+                timeout=timeout_seconds,
+            )
 
         self._tempo_client: httpx.Client | None = None
         if config.tempo_api_token:
@@ -38,12 +46,14 @@ class JiraClient:
             )
 
     def close(self) -> None:
+        if self._jira_client is not None:
+            self._jira_client.close()
         if self._tempo_client is not None:
             self._tempo_client.close()
 
     @property
     def auth_mode(self) -> str:
-        return "sso-session"
+        return "api-token"
 
     @property
     def api_base_url(self) -> str:
@@ -72,7 +82,7 @@ class JiraClient:
                 "fields": "summary,issuetype,status",
             }
         )
-        response = self._request("GET", f"/search?{query}")
+        response = self._request("GET", f"/search/jql?{query}")
         self._ensure_ok(response, "Jira search failed")
 
         payload = response.json()
@@ -99,7 +109,7 @@ class JiraClient:
                 "fields": "summary,issuetype,status",
             }
         )
-        response = self._request("GET", f"/search?{query}")
+        response = self._request("GET", f"/search/jql?{query}")
         self._ensure_ok(response, "Jira search failed")
 
         payload = response.json()
@@ -238,11 +248,13 @@ class JiraClient:
         return all_items
 
     def create_worklog(self, entry: WorklogEntry) -> None:
-        # Jira Data Center expects timezone offsets like -0300 (without colon),
-        # and is strict about parsing this field on some instances.
+        # Jira Cloud expects the worklog body to be a valid JSON document object for
+        # the comment field, not a plain string. The same pattern works for the
+        # common documented Cloud format and remains compatible with the timezone
+        # timestamp representation Jira accepts.
         started_value = entry.started_at.strftime("%Y-%m-%dT%H:%M:%S.000%z")
         payload = {
-            "comment": self._default_worklog_comment(entry.issue.key),
+            "comment": self._worklog_comment_payload(entry.comment, entry.issue.key),
             "started": started_value,
             "timeSpentSeconds": entry.time_minutes * 60,
         }
@@ -256,7 +268,7 @@ class JiraClient:
     def update_worklog(self, worklog_id: int, entry: WorklogEntry) -> None:
         started_value = entry.started_at.strftime("%Y-%m-%dT%H:%M:%S.000%z")
         payload = {
-            "comment": self._default_worklog_comment(entry.issue.key),
+            "comment": self._worklog_comment_payload(entry.comment, entry.issue.key),
             "started": started_value,
             "timeSpentSeconds": entry.time_minutes * 60,
         }
@@ -288,41 +300,47 @@ class JiraClient:
             )
 
     def _request(self, method: str, path: str, json: dict | None = None) -> httpx.Response:
-        return self._request_via_browser_session(method, path, json)
-
-    def _request_via_browser_session(self, method: str, path: str, json: dict | None = None) -> httpx.Response:
+        if self._jira_client is None:
+            raise JiraClientError(
+                "Jira credentials are not configured. Set JIRA_TRACK_JIRA_EMAIL and JIRA_TRACK_JIRA_TOKEN."
+            )
         if self._config.debug:
             logger.debug("jira_request method=%s path=%s json=%s", method, path, json)
 
-        try:
-            status, content_type, text = request_with_browser_session(
-                session_state_path=self._config.session_state_path,
-                base_url=self._api_base,
-                method=method,
-                path=path,
-                json_body=json,
-                timeout_seconds=self._timeout_seconds,
-            )
-        except SessionAuthError as exc:
-            raise JiraClientError(str(exc)) from exc
-
-        request = httpx.Request(method=method, url=f"{self._api_base}{path}")
-        response = httpx.Response(
-            status_code=status,
-            headers={"content-type": content_type},
-            content=text.encode("utf-8"),
-            request=request,
-        )
+        response = self._jira_client.request(method=method, url=path, json=json)
 
         if self._config.debug:
-            response_body = text.strip().replace("\n", " ")[:300]
-            logger.debug("jira_response method=%s path=%s status=%s content_type=%s body=%s", method, path, status, content_type, response_body)
+            response_body = response.text.strip().replace("\n", " ")[:300]
+            logger.debug(
+                "jira_response method=%s path=%s status=%s content_type=%s body=%s",
+                method,
+                path,
+                response.status_code,
+                response.headers.get("content-type", ""),
+                response_body,
+            )
 
         return response
 
     @staticmethod
     def _default_worklog_comment(issue_key: str) -> str:
         return f"Working on issue {issue_key}"
+
+    @classmethod
+    def _worklog_comment_payload(cls, comment: str | None, issue_key: str) -> dict[str, object]:
+        text = (comment or cls._default_worklog_comment(issue_key)).strip()
+        if not text:
+            text = cls._default_worklog_comment(issue_key)
+        return {
+            "type": "doc",
+            "version": 1,
+            "content": [
+                {
+                    "type": "paragraph",
+                    "content": [{"type": "text", "text": text}],
+                }
+            ],
+        }
 
     @staticmethod
     def _looks_like_upstream_proxy_block(response: httpx.Response) -> bool:
@@ -343,9 +361,8 @@ class JiraClient:
             host = str(response.request.url)
             message = (
                 f"{context}. HTTP 403 from an upstream proxy instead of Jira JSON. "
-                f"This usually means one of: the Jira base URL is wrong, your saved browser session is expired, "
-                f"or the request is hitting the wrong host/protocol. Checked URL: {host}. "
-                f"If this Jira requires browser SSO, run `jira-track login-sso` to refresh the saved session."
+                f"This usually means one of: the Jira base URL is wrong, your API token is invalid, "
+                f"or the request is hitting the wrong host/protocol. Checked URL: {host}."
             )
             raise JiraClientError(message)
 

@@ -2,7 +2,12 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from jira_tracking_bot.config import AppConfig
-from jira_tracking_bot.discovery import build_jql_for_day_snapshot, build_jql_for_window, build_period_window
+from jira_tracking_bot.discovery import (
+    build_jql_for_day_secondary_snapshot,
+    build_jql_for_day_snapshot,
+    build_jql_for_window,
+    build_period_window,
+)
 
 
 
@@ -21,6 +26,8 @@ def test_build_period_window_week_starts_monday() -> None:
 def test_build_jql_includes_project_when_configured() -> None:
     config = AppConfig(
         jira_base_url="https://example.atlassian.net",
+        jira_email="user@example.com",
+        jira_token="token-123",
         timezone="Europe/Madrid",
         default_projects=["PROJ", "OPS", "PLAT"],
     )
@@ -39,6 +46,8 @@ def test_build_jql_includes_project_when_configured() -> None:
 def test_build_jql_for_day_snapshot_includes_status_and_assignee_history() -> None:
     config = AppConfig(
         jira_base_url="https://example.atlassian.net",
+        jira_email="user@example.com",
+        jira_token="token-123",
         timezone="Europe/Madrid",
         default_projects=["PROJ"],
         in_progress_statuses=["In Progress", "Code Review"],
@@ -49,3 +58,73 @@ def test_build_jql_for_day_snapshot_includes_status_and_assignee_history() -> No
     assert 'assignee WAS IN (currentUser()) ON "2026-04-01"' in jql
     assert 'status WAS IN ("In Progress", "Code Review") ON "2026-04-01"' in jql
     assert 'project in ("PROJ")' in jql
+    assert '(resolution is EMPTY OR resolved >= "2026-04-01")' in jql
+
+
+def test_build_jql_for_day_snapshot_defaults_to_on_day_mode() -> None:
+    config = AppConfig(
+        jira_base_url="https://example.atlassian.net",
+        jira_email="user@example.com",
+        jira_token="token-123",
+        timezone="Europe/Madrid",
+        in_progress_statuses=["In Progress"],
+    )
+
+    jql = build_jql_for_day_snapshot(config, datetime(2026, 4, 1, 9, 0, tzinfo=ZoneInfo("UTC")).date())
+
+    assert ' ON "2026-04-01"' in jql
+    assert " DURING " not in jql
+
+
+def test_build_jql_for_day_snapshot_supports_bounded_during_mode() -> None:
+    config = AppConfig(
+        jira_base_url="https://example.atlassian.net",
+        jira_email="user@example.com",
+        jira_token="token-123",
+        timezone="Europe/Madrid",
+        in_progress_statuses=["In Progress", "Code Review"],
+        daily_snapshot_mode="bounded_during",
+    )
+
+    jql = build_jql_for_day_snapshot(config, datetime(2026, 4, 1, 9, 0, tzinfo=ZoneInfo("UTC")).date())
+
+    assert 'assignee WAS IN (currentUser()) DURING ("2026-04-01 00:00", "2026-04-02 00:00")' in jql
+    assert 'status WAS IN ("In Progress", "Code Review") DURING ("2026-04-01 00:00", "2026-04-02 00:00")' in jql
+    assert '(resolution is EMPTY OR resolved >= "2026-04-01")' in jql
+
+
+def test_build_jql_for_day_secondary_snapshot_includes_resolution_guard() -> None:
+    config = AppConfig(
+        jira_base_url="https://example.atlassian.net",
+        jira_email="user@example.com",
+        jira_token="token-123",
+        timezone="Europe/Madrid",
+        default_projects=["PROJ"],
+        secondary_tracking_statuses=["In Review"],
+    )
+
+    jql = build_jql_for_day_secondary_snapshot(config, datetime(2026, 4, 1, 9, 0, tzinfo=ZoneInfo("UTC")).date())
+
+    assert jql is not None
+    assert 'assignee WAS IN (currentUser()) ON "2026-04-01"' in jql
+    assert 'status WAS IN ("In Review") ON "2026-04-01"' in jql
+    assert 'project in ("PROJ")' in jql
+    assert '(resolution is EMPTY OR resolved >= "2026-04-01")' in jql
+
+
+def test_build_jql_for_day_secondary_snapshot_supports_bounded_during_mode() -> None:
+    config = AppConfig(
+        jira_base_url="https://example.atlassian.net",
+        jira_email="user@example.com",
+        jira_token="token-123",
+        timezone="Europe/Madrid",
+        secondary_tracking_statuses=["In Review"],
+        daily_snapshot_mode="bounded_during",
+    )
+
+    jql = build_jql_for_day_secondary_snapshot(config, datetime(2026, 4, 1, 9, 0, tzinfo=ZoneInfo("UTC")).date())
+
+    assert jql is not None
+    assert 'assignee WAS IN (currentUser()) DURING ("2026-04-01 00:00", "2026-04-02 00:00")' in jql
+    assert 'status WAS IN ("In Review") DURING ("2026-04-01 00:00", "2026-04-02 00:00")' in jql
+    assert '(resolution is EMPTY OR resolved >= "2026-04-01")' in jql

@@ -23,8 +23,7 @@ RUN apt-get update \
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-RUN pip install --no-cache-dir . \
-    && python -m playwright install --with-deps chromium
+RUN pip install --no-cache-dir .
 
 COPY --from=web-build /web/dist /usr/share/nginx/html
 COPY deploy/nginx.conf /etc/nginx/conf.d/app.conf

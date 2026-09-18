@@ -170,17 +170,19 @@ class _FakeJiraClientRefreshForce(_FakeJiraClientNoLogs):
 def _fake_config_with_secondary() -> AppConfig:
     return AppConfig(
         jira_base_url="https://jira.example.com",
+        jira_email="user@example.com",
+        jira_token="token-123",
         timezone="UTC",
         secondary_tracking_statuses=["In Review"],
-        session_state_path=Path("/tmp/non-required-for-test.json"),
     )
 
 
 def _fake_config() -> AppConfig:
     return AppConfig(
         jira_base_url="https://jira.example.com",
+        jira_email="user@example.com",
+        jira_token="token-123",
         timezone="UTC",
-        session_state_path=Path("/tmp/non-required-for-test.json"),
     )
 
 

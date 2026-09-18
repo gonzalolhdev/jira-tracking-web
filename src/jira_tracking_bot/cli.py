@@ -13,12 +13,6 @@ from jira_tracking_bot.heuristics.git_signals import suggest_minutes_from_git
 from jira_tracking_bot.jira_client import JiraClient, JiraClientError
 from jira_tracking_bot.review_flow import ask_for_confirmation, collect_final_minutes
 from jira_tracking_bot.review_table import render_preview_table
-from jira_tracking_bot.session_auth import (
-    SessionAuthError,
-    delete_browser_session,
-    login_with_browser_session,
-    session_summary,
-)
 from jira_tracking_bot.worklog_submitter import submit_worklogs
 
 app = typer.Typer(help="Track worked Jira tickets and submit worklogs with preview confirmation")
@@ -36,7 +30,7 @@ def auth_check(config: str | None = typer.Option(None, help="Path to config json
     """Validate Jira credentials."""
     try:
         client, _ = _load_client(config)
-    except (ConfigError, SessionAuthError) as exc:
+    except ConfigError as exc:
         raise typer.Exit(code=_print_error(str(exc)))
 
     try:
@@ -48,39 +42,6 @@ def auth_check(config: str | None = typer.Option(None, help="Path to config json
         client.close()
 
 
-@app.command("login-sso")
-def login_sso(
-    config: str | None = typer.Option(None, help="Path to config json"),
-    headless: bool = typer.Option(False, help="Run browser in headless mode"),
-    cdp_url: str | None = typer.Option(
-        None,
-        help="Attach to an existing Chrome via CDP (example: http://127.0.0.1:9222)",
-    ),
-) -> None:
-    """Open a browser, complete SSO login, and save session state locally."""
-    try:
-        app_config = load_config(config, require_auth=False)
-        session_path = login_with_browser_session(app_config, headless=headless, cdp_url=cdp_url)
-        console.print(f"Saved SSO session to {session_path}")
-    except (ConfigError, SessionAuthError) as exc:
-        raise typer.Exit(code=_print_error(str(exc)))
-
-
-@app.command("logout-sso")
-def logout_sso(config: str | None = typer.Option(None, help="Path to config json")) -> None:
-    """Delete saved SSO session state."""
-    try:
-        app_config = load_config(config, require_auth=False)
-    except ConfigError as exc:
-        raise typer.Exit(code=_print_error(str(exc)))
-
-    removed = delete_browser_session(app_config)
-    if removed:
-        console.print(f"Removed SSO session at {app_config.session_state_path}")
-    else:
-        console.print(f"No SSO session found at {app_config.session_state_path}")
-
-
 @app.command("diagnose-auth")
 def diagnose_auth(config: str | None = typer.Option(None, help="Path to config json")) -> None:
     """Show resolved auth mode and probe Jira endpoints."""
@@ -89,20 +50,17 @@ def diagnose_auth(config: str | None = typer.Option(None, help="Path to config j
     except ConfigError as exc:
         raise typer.Exit(code=_print_error(str(exc)))
 
-    summary = session_summary(app_config.session_state_path)
-
     table = Table(title="Jira Auth Diagnosis")
     table.add_column("Check")
     table.add_column("Value")
-    table.add_row("Base URL", f"{app_config.jira_base_url}/rest/api/2/")
-    table.add_row("Auth mode", "sso")
-    table.add_row("SSO session path", str(app_config.session_state_path))
-    table.add_row("SSO session exists", "yes" if summary["exists"] else "no")
-    table.add_row("SSO cookies saved", str(summary["cookies"]))
+    table.add_row("Base URL", f"{app_config.jira_base_url}/rest/api/3/")
+    table.add_row("Auth mode", "api-token")
+    table.add_row("Jira email configured", "yes" if app_config.jira_email else "no")
+    table.add_row("Jira token configured", "yes" if app_config.jira_token else "no")
 
     try:
         client = JiraClient(app_config)
-    except (JiraClientError, SessionAuthError) as exc:
+    except JiraClientError as exc:
         table.add_row("Client initialization", str(exc))
         console.print(table)
         raise typer.Exit(code=0)
@@ -128,7 +86,7 @@ def preview(
     """Fetch issues and show preview table with suggested time."""
     try:
         client, app_config = _load_client(config)
-    except (ConfigError, SessionAuthError) as exc:
+    except ConfigError as exc:
         raise typer.Exit(code=_print_error(str(exc)))
 
     now = datetime.now(app_config.tzinfo)
@@ -167,7 +125,7 @@ def submit(
     """Interactive review then submit worklogs."""
     try:
         client, app_config = _load_client(config)
-    except (ConfigError, SessionAuthError) as exc:
+    except ConfigError as exc:
         raise typer.Exit(code=_print_error(str(exc)))
 
     now = datetime.now(app_config.tzinfo)

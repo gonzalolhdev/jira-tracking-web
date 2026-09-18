@@ -29,8 +29,9 @@ const QUARTER_HOUR = 0.25;
 const STEP_MINUTES = 15;
 type AuthStatus = {
   auth_mode: string;
-  session_exists: boolean;
-  cookies: number;
+  token_configured: boolean;
+  token_valid: boolean;
+  validation_error: string | null;
   jira_base_url?: string;
 };
 
@@ -131,8 +132,8 @@ async function responseDetail(resp: Response): Promise<string> {
   return text;
 }
 
-function requiresSsoLogin(status: AuthStatus | null): boolean {
-  return Boolean(status && !status.session_exists);
+function requiresTokenSetup(status: AuthStatus | null): boolean {
+  return Boolean(status && (!status.token_configured || !status.token_valid));
 }
 
 function buildIssueBrowseUrl(
@@ -285,7 +286,6 @@ export default function App() {
   const [dayLoadingByDate, setDayLoadingByDate] = useState<
     Record<string, boolean>
   >({});
-  const [authLoading, setAuthLoading] = useState(false);
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
@@ -381,7 +381,7 @@ export default function App() {
       setLoading(false);
       return;
     }
-    if (status && requiresSsoLogin(status)) {
+    if (status && requiresTokenSetup(status)) {
       setPlan(null);
       setLoading(false);
       return;
@@ -439,27 +439,6 @@ export default function App() {
         err instanceof Error ? err.message : "Auth status check failed",
       );
       return null;
-    }
-  }
-
-  async function loginSso() {
-    setAuthLoading(true);
-    setError(null);
-    try {
-      const resp = await fetch("/api/auth/login-sso", {
-        method: "POST",
-      });
-      if (!resp.ok) {
-        throw new Error(await responseDetail(resp));
-      }
-      const status = await loadAuthStatus();
-      if (status && !requiresSsoLogin(status)) {
-        await loadPlan();
-      }
-    } catch (err) {
-      reportError(err instanceof Error ? err.message : "SSO login failed");
-    } finally {
-      setAuthLoading(false);
     }
   }
 
@@ -681,6 +660,21 @@ export default function App() {
         if (di !== dayIndex) return day;
         const entries = day.entries.map((entry) => ({ ...entry, minutes: 0 }));
         return { ...day, entries, total_minutes: 0 };
+      });
+      return { ...current, days };
+    });
+  }
+
+  function removeAllDayEntries(dayIndex: number) {
+    setPlan((current) => {
+      if (!current) return current;
+      const days = current.days.map((day, di) => {
+        if (di !== dayIndex) return day;
+        const entries = day.entries.map((entry) => ({ ...entry, removed: true }));
+        const total = entries
+          .filter((e) => !e.removed)
+          .reduce((acc, e) => acc + e.minutes, 0);
+        return { ...day, entries, total_minutes: total };
       });
       return { ...current, days };
     });
@@ -925,20 +919,6 @@ export default function App() {
       logActivity([{ kind: "error", message }]);
     } finally {
       setAddingTicketDayDate(null);
-    }
-  }
-
-  async function logout() {
-    setAuthLoading(true);
-    setError(null);
-    try {
-      await fetch("/api/auth/logout", { method: "POST" });
-      setPlan(null);
-      await loadAuthStatus();
-    } catch {
-      // ignore
-    } finally {
-      setAuthLoading(false);
     }
   }
 
@@ -1278,23 +1258,22 @@ export default function App() {
     ? (exportReports.find((day) => day.date === previewDayDate) ?? null)
     : null;
 
-  if (!authStatus || requiresSsoLogin(authStatus)) {
+  if (!authStatus || requiresTokenSetup(authStatus)) {
     return (
       <main className="page gate-page">
         <section className="gate-card">
           <p className="eyebrow">Jira Time Tracker</p>
-          <h1>Sign in to continue</h1>
+          <h1>Token setup required</h1>
           <p className="gate-copy">
-            Login with your SSO session to access month planning and worklog
-            submissions.
+            Configure a valid Jira Cloud API token to access month planning and
+            worklog submissions.
           </p>
-          <button
-            className="primary"
-            onClick={() => void loginSso()}
-            disabled={authLoading}
-          >
-            {authLoading ? "Opening SSO..." : "Login with SSO"}
+          <button className="primary" onClick={() => void bootstrap()}>
+            Retry Health Check
           </button>
+          {authStatus?.validation_error && (
+            <p className="error">{authStatus.validation_error}</p>
+          )}
           {storageWarning && <p className="warning-small">{storageWarning}</p>}
           {error && <p className="error">{error}</p>}
         </section>
@@ -1330,13 +1309,6 @@ export default function App() {
             disabled={!plan || savingMonth}
           >
             {savingMonth ? "Submitting..." : "Submit Month"}
-          </button>
-          <button
-            className="danger-ghost"
-            onClick={() => void logout()}
-            disabled={authLoading}
-          >
-            Log out
           </button>
         </div>
       </header>
@@ -1544,6 +1516,13 @@ export default function App() {
                         )}
                       </div>
                       <div className="day-summary-actions">
+                        <button
+                          className="ghost danger-ghost"
+                          onClick={() => removeAllDayEntries(dayIndex)}
+                          disabled={isDayBusy || day.entries.length === 0 || day.entries.every((entry) => entry.removed)}
+                        >
+                          Remove All
+                        </button>
                         <button
                           className="ghost danger-ghost"
                           onClick={() => resetDayMinutes(dayIndex)}
