@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from jira_tracking_bot.config import AppConfig
-from jira_tracking_bot.productive_client import ProductiveTimeEntry
+from jira_tracking_bot.productive_client import ProductiveClient, ProductiveTimeEntry
 from jira_tracking_bot.web import app as web_app
 
 
@@ -11,6 +11,7 @@ class _FakeProductiveClient:
     def __init__(self, entries: list[ProductiveTimeEntry] | None = None) -> None:
         self.entries = entries or []
         self.created_note: str | None = None
+        self.deleted_entry_ids: list[str] = []
 
     def get_time_entries(self, after: str, before: str) -> list[ProductiveTimeEntry]:
         _ = (after, before)
@@ -40,6 +41,9 @@ class _FakeProductiveClient:
             note=note,
             service_id=service_id,
         )
+
+    def delete_time_entry(self, entry_id: str) -> None:
+        self.deleted_entry_ids.append(entry_id)
 
 
 def _fake_config() -> AppConfig:
@@ -105,3 +109,46 @@ def test_productive_entry_creation_sanitizes_payload_before_storage(monkeypatch)
         '<p>Daily update </p><p><a href="https://example.com" target="_blank" rel="noreferrer noopener">Link</a></p>'
     )
     assert payload["note"] == client.created_note
+
+
+def test_productive_entry_delete_endpoint_removes_existing_entry(monkeypatch) -> None:
+    client = _FakeProductiveClient(
+        entries=[
+            ProductiveTimeEntry(
+                id="entry-old",
+                date="2026-09-18",
+                time=480,
+                note="old note",
+                service_id="service-1",
+            )
+        ]
+    )
+
+    monkeypatch.setattr(web_app, "_get_productive_client", lambda: client)
+
+    resp = TestClient(web_app.app).delete("/api/productive/time-entries/entry-old")
+
+    assert resp.status_code == 204
+    assert client.deleted_entry_ids == ["entry-old"]
+
+
+def test_productive_delete_allows_empty_204_response(monkeypatch) -> None:
+    client = ProductiveClient(base_url="https://productive.example.com", token="token", org_id="org-1")
+
+    class _EmptyResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b""
+
+    def fake_urlopen(_req, *args, **kwargs):
+        _ = (args, kwargs)
+        return _EmptyResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    client.delete_time_entry("entry-old")

@@ -6,6 +6,7 @@ import {
   EXPORT_DAY_STATE_STORAGE_KEY,
   ExportDayReport,
   ExportFolderKey,
+  moveItemBetweenFolders,
   parsePersistedExportState,
   parsePersistedExportStateSafely,
   parseStoredActivities,
@@ -1046,6 +1047,16 @@ export default function App() {
     setSubmittingToProductiveDate(date);
     setProductiveError(null);
     try {
+      const existing = productiveEntries[date] ?? null;
+      if (existing) {
+        const deleteResp = await fetch(`/api/productive/time-entries/${encodeURIComponent(existing.id)}`, {
+          method: "DELETE",
+        });
+        if (!deleteResp.ok && deleteResp.status !== 404) {
+          throw new Error(await responseDetail(deleteResp));
+        }
+      }
+
       const resp = await fetch("/api/productive/time-entries", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1163,34 +1174,28 @@ export default function App() {
     beforeItemId: string | null,
   ) {
     updateExportReport(date, (day) => {
-      // Remove from source folder
-      const fromItemIds = day.folders[fromFolderKey].itemIds.filter(
-        (id) => id !== draggedId,
+      const folders = moveItemBetweenFolders(
+        {
+          inProgress: [...day.folders.inProgress.itemIds],
+          done: [...day.folders.done.itemIds],
+        },
+        fromFolderKey,
+        toFolderKey,
+        draggedId,
+        beforeItemId,
       );
-
-      // Add to target folder
-      const toItemIds = [...day.folders[toFolderKey].itemIds];
-      const insertIndex =
-        beforeItemId === null
-          ? toItemIds.length
-          : toItemIds.indexOf(beforeItemId);
-      if (insertIndex >= 0) {
-        toItemIds.splice(insertIndex, 0, draggedId);
-      } else {
-        toItemIds.push(draggedId);
-      }
 
       return {
         ...day,
         folders: {
           ...day.folders,
-          [fromFolderKey]: {
-            ...day.folders[fromFolderKey],
-            itemIds: fromItemIds,
+          inProgress: {
+            ...day.folders.inProgress,
+            itemIds: folders.inProgress,
           },
-          [toFolderKey]: {
-            ...day.folders[toFolderKey],
-            itemIds: toItemIds,
+          done: {
+            ...day.folders.done,
+            itemIds: folders.done,
           },
         },
       };

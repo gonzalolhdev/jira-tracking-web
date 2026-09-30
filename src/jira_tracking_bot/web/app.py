@@ -1724,6 +1724,18 @@ async def create_productive_entry(payload: CreateProductiveEntryRequest) -> Prod
     )
 
 
+@app.delete("/api/productive/time-entries/{entry_id}", status_code=204)
+async def delete_productive_entry(entry_id: str) -> None:
+    client = _get_productive_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Productive integration is not configured.")
+
+    try:
+        await asyncio.to_thread(client.delete_time_entry, entry_id)
+    except ProductiveClientError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def run() -> None:
     try:
         config = load_config(require_auth=False)

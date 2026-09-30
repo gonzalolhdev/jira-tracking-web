@@ -54,6 +54,8 @@ class ProductiveClient:
                 raw = resp.read().decode()
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode()
+            if not raw:
+                raise ProductiveClientError(f"Productive API {method} {path} failed: HTTP {exc.code}") from exc
             try:
                 parsed = json.loads(raw)
             except Exception:
@@ -63,6 +65,9 @@ class ProductiveClient:
             raise ProductiveClientError(f"Productive API error: {detail}") from exc
         except Exception as exc:
             raise ProductiveClientError(f"Productive API request failed: {exc}") from exc
+
+        if not raw:
+            return {}
 
         try:
             return json.loads(raw)
@@ -261,3 +266,7 @@ class ProductiveClient:
             note=attrs.get("note") or "",
             service_id=svc_data.get("id") if svc_data else None,
         )
+
+    def delete_time_entry(self, entry_id: str) -> None:
+        """Delete an existing time entry."""
+        self._request("DELETE", f"/time_entries/{entry_id}")

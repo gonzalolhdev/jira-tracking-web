@@ -201,6 +201,48 @@ function mergeItemOrder(defaultOrder: string[], persistedOrder?: string[]): stri
   return merged;
 }
 
+export function moveItemBetweenFolders(
+  folders: Record<ExportFolderKey, string[]>,
+  fromFolderKey: ExportFolderKey,
+  toFolderKey: ExportFolderKey,
+  draggedId: string,
+  beforeItemId: string | null,
+): Record<ExportFolderKey, string[]> {
+  const fromItemIds = folders[fromFolderKey].filter((id) => id !== draggedId);
+  const nextFolders: Record<ExportFolderKey, string[]> = {
+    ...folders,
+    [fromFolderKey]: fromItemIds,
+  };
+
+  if (fromFolderKey === toFolderKey) {
+    const reordered = [...folders[fromFolderKey]];
+    const fromIndex = reordered.indexOf(draggedId);
+    if (fromIndex === -1) {
+      return nextFolders;
+    }
+    const [dragged] = reordered.splice(fromIndex, 1);
+    const insertIndex = beforeItemId === null ? reordered.length : reordered.indexOf(beforeItemId);
+    if (insertIndex >= 0) {
+      reordered.splice(insertIndex, 0, dragged);
+    } else {
+      reordered.push(dragged);
+    }
+    nextFolders[fromFolderKey] = reordered;
+    return nextFolders;
+  }
+
+  const toItemIds = [...folders[toFolderKey]];
+  const insertIndex = beforeItemId === null ? toItemIds.length : toItemIds.indexOf(beforeItemId);
+  if (insertIndex >= 0) {
+    toItemIds.splice(insertIndex, 0, draggedId);
+  } else {
+    toItemIds.push(draggedId);
+  }
+
+  nextFolders[toFolderKey] = toItemIds;
+  return nextFolders;
+}
+
 export function buildInitialExportDays(plan: MonthPlan, activities: UserActivity[], persisted?: PersistedExportState | null): ExportDayReport[] {
   const collectionsByDate = deriveDayCollections(plan);
   const sortedDays = [...plan.days].sort((a, b) => a.date.localeCompare(b.date));

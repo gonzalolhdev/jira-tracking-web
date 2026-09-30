@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildExportTextOutput,
   buildInitialExportDays,
+  moveItemBetweenFolders,
   parseStoredActivities,
   serializeExportDayState,
   UserActivity,
@@ -178,6 +179,37 @@ describe("buildInitialExportDays", () => {
 
     expect(labels).toContain("PROJ-100: Already logged");
     expect(labels).not.toContain("PROJ-200: Planned but not logged");
+  });
+
+  it("moves items between folders even when the destination or source is empty", () => {
+    const movedToInProgress = moveItemBetweenFolders(
+      {
+        inProgress: ["APP-1: Continue dashboard work"],
+        done: ["APP-2: Ship landing page"],
+      },
+      "done",
+      "inProgress",
+      "APP-2: Ship landing page",
+      null,
+    );
+
+    expect(movedToInProgress).toEqual({
+      inProgress: ["APP-1: Continue dashboard work", "APP-2: Ship landing page"],
+      done: [],
+    });
+
+    const movedBack = moveItemBetweenFolders(
+      movedToInProgress,
+      "inProgress",
+      "done",
+      "APP-2: Ship landing page",
+      null,
+    );
+
+    expect(movedBack).toEqual({
+      inProgress: ["APP-1: Continue dashboard work"],
+      done: ["APP-2: Ship landing page"],
+    });
   });
 });
 
