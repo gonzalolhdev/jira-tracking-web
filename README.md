@@ -21,6 +21,27 @@ The container runs:
 - Compose healthcheck against `/api/health`
 - Restart policy `unless-stopped` for server-style operation
 
+### On-demand launcher (macOS Dock icon)
+
+Click an icon in your Dock to start the app, no terminals needed.
+
+Prerequisites: macOS, [Docker Desktop](https://www.docker.com/products/docker-desktop/), Google Chrome, Git.
+
+1. Clone the repo and `cd` into it.
+2. Create your env files and fill in the values (see [Docker setup](#docker-setup)):
+   ```bash
+   cp .env.example .env
+   cp .env.productive.example .env.productive
+   ```
+3. From the repo root, build the launcher:
+   ```bash
+   scripts/build-app.sh
+   ```
+4. Open `~/Applications` in Finder (Cmd+Shift+G, paste `~/Applications`) and drag **Jira Track** to your Dock.
+5. Click it. The first run takes a few minutes while the image builds; if macOS blocks it, right-click the app and choose Open.
+
+When you're done: `scripts/launch.sh stop`. If you move the repo, re-run `scripts/build-app.sh`.
+
 ### Docker setup
 
 1. Create and edit `.env`:
