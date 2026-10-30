@@ -7,6 +7,11 @@ services:
       - "8080:80"
     restart: unless-stopped
     stop_grace_period: 30s
+    env_file:
+      - path: .env.productive
+        required: false
+    volumes:
+      - ./.jira-track:/app/.jira-track
     environment:
       JIRA_TRACK_JIRA_BASE_URL: ${JIRA_TRACK_JIRA_BASE_URL}
       JIRA_TRACK_JIRA_EMAIL: ${JIRA_TRACK_JIRA_EMAIL}

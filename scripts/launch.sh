@@ -20,6 +20,27 @@ if [ "${1:-start}" = "stop" ]; then
   exit 0
 fi
 
+# If the app window is already open in Chrome, just bring it to the front.
+focus_existing() {
+  pgrep -x "Google Chrome" >/dev/null || return 1
+  [ "$(osascript <<OSA 2>/dev/null
+tell application "Google Chrome"
+  repeat with w in windows
+    repeat with t in tabs of w
+      if URL of t starts with "$URL" then
+        set index of w to 1
+        activate
+        return "found"
+      end if
+    end repeat
+  end repeat
+  return "none"
+end tell
+OSA
+)" = "found" ]
+}
+focus_existing && exit 0
+
 if ! docker info >/dev/null 2>&1; then
   notify "Starting Docker..."
   # Headless engine start (no dashboard window); fall back to a hidden app launch.
