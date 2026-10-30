@@ -135,7 +135,7 @@ button {
   transition: transform 100ms ease, box-shadow 100ms ease, background-color 100ms ease, border-color 100ms ease;
 }
 
-button:hover:not(:disabled) {
+button:hover:not(:disabled):not(.export-preview-backdrop) {
   transform: translateY(-1px);
   box-shadow: var(--shadow-sm);
   border-color: #364060;
@@ -461,6 +461,24 @@ button.danger-ghost:hover:not(:disabled) {
 .badge-pending {
   color: var(--warn-ink);
   border-color: rgba(234, 179, 8, 0.45);
+}
+
+.badge-exempt {
+  color: var(--ink-2);
+  border-color: rgba(148, 156, 178, 0.45);
+}
+
+.exempt-warning-icon {
+  color: var(--danger-ink);
+  cursor: help;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+button.exempt-toggle.active {
+  border-color: rgba(148, 156, 178, 0.7);
+  background: rgba(148, 156, 178, 0.2);
+  color: var(--ink-0);
 }
 
 .day-summary-actions {

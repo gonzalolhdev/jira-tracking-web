@@ -15,6 +15,13 @@ import {
   UserActivity,
 } from "./export-report";
 import {
+  addExemptDays,
+  EXEMPT_DAYS_STORAGE_KEY,
+  isExemptDay,
+  parseExemptDaysSafely,
+  removeExemptDay,
+} from "./exempt-days";
+import {
   DayPlan,
   MonthPlan,
   ProductiveEntriesResponse,
@@ -104,10 +111,10 @@ function formatDayHeading(isoDate: string): string {
   return `${monthAndYear.split(" ")[0]} ${day}${suffix} ${date.getFullYear()}`;
 }
 
-function balanceLabel(totalMinutes: number): string {
-  const delta = TARGET_MINUTES - totalMinutes;
+function balanceLabel(totalMinutes: number, targetMinutes = TARGET_MINUTES): string {
+  const delta = targetMinutes - totalMinutes;
   if (delta === 0) {
-    return "On target (8h)";
+    return `On target (${formatHours(targetMinutes)})`;
   }
   if (delta > 0) {
     return `Remaining ${formatHours(delta)}`;
@@ -207,6 +214,9 @@ function dayLoggedMinutes(day: DayPlan): number {
     .filter((e) => !e.removed && e.source === "logged")
     .reduce((acc, e) => acc + e.minutes, 0);
 }
+
+const EXEMPT_LOGGED_WARNING =
+  "This day has logged records. Fix them manually in Jira.";
 
 function loadStoredActivities(): UserActivity[] {
   if (typeof window === "undefined") {
@@ -322,6 +332,15 @@ export default function App() {
     beforeItemId: string | null;
   } | null>(null);
 
+  // Sick Leave/PTO: "draft" days are marked locally and not yet submitted; stored days are submitted ones.
+  const [exemptDraftDates, setExemptDraftDates] = useState<Set<string>>(new Set());
+  const [exemptSnapshots, setExemptSnapshots] = useState<Record<string, DayPlan["entries"]>>({});
+  const [exemptStored, setExemptStored] = useState(() =>
+    typeof window === "undefined"
+      ? {}
+      : parseExemptDaysSafely(window.localStorage.getItem(EXEMPT_DAYS_STORAGE_KEY)).value,
+  );
+
   // Productive integration state
   const [productiveEntries, setProductiveEntries] = useState<Record<string, ProductiveTimeEntry>>({});
   const [productiveAvailable, setProductiveAvailable] = useState(false);
@@ -363,6 +382,13 @@ export default function App() {
     if (parsedExportState.corrupted) {
       window.localStorage.removeItem(EXPORT_DAY_STATE_STORAGE_KEY);
       setPreviewDayDate(null);
+      foundCorruption = true;
+    }
+
+    if (
+      parseExemptDaysSafely(window.localStorage.getItem(EXEMPT_DAYS_STORAGE_KEY)).corrupted
+    ) {
+      window.localStorage.removeItem(EXEMPT_DAYS_STORAGE_KEY);
       foundCorruption = true;
     }
 
@@ -476,9 +502,13 @@ export default function App() {
     setPlan(data);
     const byFinalState: Record<string, boolean> = {};
     for (const day of data.days) {
-      byFinalState[day.date] = dayLoggedMinutes(day) < TARGET_MINUTES;
+      byFinalState[day.date] =
+        !isExemptDay(exemptStored, day.date) &&
+        dayLoggedMinutes(day) < TARGET_MINUTES;
     }
     setAccordionOpen(byFinalState);
+    setExemptDraftDates(new Set());
+    setExemptSnapshots({});
     setDayLoadingByDate({});
   }
 
@@ -654,16 +684,71 @@ export default function App() {
     updateEntry(dayIndex, entryIndex, { minutes: 0 });
   }
 
-  function resetDayMinutes(dayIndex: number) {
+  function persistExemptStored(next: typeof exemptStored) {
+    setExemptStored(next);
+    try {
+      window.localStorage.setItem(EXEMPT_DAYS_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      setStorageWarning("Could not save Sick Leave/PTO days.");
+    }
+  }
+
+  function toggleExemptDraft(dayIndex: number) {
+    if (!plan) return;
+    const day = plan.days[dayIndex];
+    if (isExemptDraft(day)) {
+      const snapshot = exemptSnapshots[day.date] ?? [];
+      setPlan((current) => {
+        if (!current) return current;
+        const days = current.days.map((d, di) => {
+          if (di !== dayIndex) return d;
+          const total = snapshot
+            .filter((e) => !e.removed)
+            .reduce((acc, e) => acc + e.minutes, 0);
+          return { ...d, entries: snapshot, total_minutes: total };
+        });
+        return { ...current, days };
+      });
+      clearExemptDraft(day.date);
+      return;
+    }
+    setExemptSnapshots((current) => ({ ...current, [day.date]: day.entries }));
+    setExemptDraftDates((current) => new Set(current).add(day.date));
     setPlan((current) => {
       if (!current) return current;
-      const days = current.days.map((day, di) => {
-        if (di !== dayIndex) return day;
-        const entries = day.entries.map((entry) => ({ ...entry, minutes: 0 }));
-        return { ...day, entries, total_minutes: 0 };
+      const days = current.days.map((d, di) => {
+        if (di !== dayIndex) return d;
+        const entries = d.entries.map((e) => ({ ...e, removed: true, minutes: 0 }));
+        return { ...d, entries, total_minutes: 0 };
       });
       return { ...current, days };
     });
+  }
+
+  function clearExemptDraft(dayDate: string) {
+    setExemptDraftDates((current) => {
+      if (!current.has(dayDate)) return current;
+      const next = new Set(current);
+      next.delete(dayDate);
+      return next;
+    });
+  }
+
+  /** A draft ends as soon as any entry is restored or added. */
+  function isExemptDraft(day: DayPlan): boolean {
+    return (
+      exemptDraftDates.has(day.date) && day.entries.every((entry) => entry.removed)
+    );
+  }
+
+  function isExemptLocked(dayDate: string): boolean {
+    return isExemptDay(exemptStored, dayDate);
+  }
+
+  function exemptHasLoggedRecords(day: DayPlan): boolean {
+    return (exemptSnapshots[day.date] ?? day.entries).some(
+      (entry) => entry.source === "logged" && entry.minutes > 0,
+    );
   }
 
   function removeAllDayEntries(dayIndex: number) {
@@ -702,10 +787,14 @@ export default function App() {
 
   async function submitMonth() {
     if (!plan) return;
+    const exemptDraftDays = plan.days.filter((day) => isExemptDraft(day));
     const pendingDays = plan.days.filter(
-      (day) => dayLoggedMinutes(day) < TARGET_MINUTES,
+      (day) =>
+        !isExemptLocked(day.date) &&
+        !isExemptDraft(day) &&
+        dayLoggedMinutes(day) < TARGET_MINUTES,
     );
-    if (pendingDays.length === 0) {
+    if (pendingDays.length === 0 && exemptDraftDays.length === 0) {
       logActivity([{ kind: "info", message: "No pending days to submit." }]);
       return;
     }
@@ -714,20 +803,33 @@ export default function App() {
     setError(null);
     setDaySubmitErrors({});
     try {
-      const resp = await fetch("/api/month/submit", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          month: plan.month,
-          timezone: plan.timezone,
-          days: pendingDays,
-        }),
-      });
-      if (!resp.ok) {
-        throw new Error(await responseDetail(resp));
+      if (pendingDays.length > 0) {
+        const resp = await fetch("/api/month/submit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            month: plan.month,
+            timezone: plan.timezone,
+            days: pendingDays,
+          }),
+        });
+        if (!resp.ok) {
+          throw new Error(await responseDetail(resp));
+        }
+        const data = (await resp.json()) as { results: SubmitItemResult[] };
+        logSubmitResults(data.results);
       }
-      const data = (await resp.json()) as { results: SubmitItemResult[] };
-      logSubmitResults(data.results);
+      if (exemptDraftDays.length > 0) {
+        persistExemptStored(
+          addExemptDays(exemptStored, exemptDraftDays.map((day) => day.date)),
+        );
+        logActivity([
+          {
+            kind: "info",
+            message: `${exemptDraftDays.length} Sick Leave/PTO day(s) saved.`,
+          },
+        ]);
+      }
       // Month submit succeeded — reload whole month to reflect fresh logged state.
       setSavingMonth(false);
       await loadPlan();
@@ -743,6 +845,15 @@ export default function App() {
     if (!plan) return;
 
     const day = plan.days[dayIndex];
+    if (isExemptDraft(day)) {
+      persistExemptStored(addExemptDays(exemptStored, [day.date]));
+      clearExemptDraft(day.date);
+      setAccordionOpen((prev) => ({ ...prev, [day.date]: false }));
+      logActivity([
+        { kind: "info", message: `${day.date} · marked as Sick Leave/PTO.` },
+      ]);
+      return;
+    }
     setSavingDayDate(day.date);
     setError(null);
     setDaySubmitErrors((current) => {
@@ -806,6 +917,14 @@ export default function App() {
           d.date === dayDate ? freshDay : d,
         );
         return { ...current, days };
+      });
+      if (isExemptLocked(dayDate)) {
+        persistExemptStored(removeExemptDay(exemptStored, dayDate));
+      }
+      clearExemptDraft(dayDate);
+      setExemptSnapshots((current) => {
+        const { [dayDate]: _removed, ...rest } = current;
+        return rest;
       });
       setAccordionOpen((prev) => ({
         ...prev,
@@ -929,11 +1048,27 @@ export default function App() {
     let under = 0;
     let over = 0;
     for (const day of plan.days) {
-      if (day.total_minutes === TARGET_MINUTES) exact += 1;
-      else if (day.total_minutes < TARGET_MINUTES) under += 1;
+      const target =
+        isExemptLocked(day.date) || isExemptDraft(day) ? 0 : TARGET_MINUTES;
+      const total = isExemptLocked(day.date) ? 0 : day.total_minutes;
+      if (total === target) exact += 1;
+      else if (total < target) under += 1;
       else over += 1;
     }
     return { exact, under, over };
+  }, [plan, exemptStored, exemptDraftDates]);
+
+  useEffect(() => {
+    if (!plan) return;
+    setExemptDraftDates((current) => {
+      const next = new Set(
+        [...current].filter((date) => {
+          const day = plan.days.find((d) => d.date === date);
+          return day !== undefined && day.entries.every((entry) => entry.removed);
+        }),
+      );
+      return next.size === current.size ? current : next;
+    });
   }, [plan]);
 
   const exportSeedActivities = useMemo(
@@ -1395,17 +1530,21 @@ export default function App() {
       {plan && (
         <section className="days-grid">
           {plan.days.map((day, dayIndex) => {
-            const dayBalance = balanceLabel(day.total_minutes);
+            const isLocked = isExemptLocked(day.date);
+            const isDraft = isExemptDraft(day);
+            const dayTarget = isLocked || isDraft ? 0 : TARGET_MINUTES;
+            const dayTotal = isLocked ? 0 : day.total_minutes;
+            const dayBalance = balanceLabel(dayTotal, dayTarget);
             const balanceClass =
-              day.total_minutes === TARGET_MINUTES
+              dayTotal === dayTarget
                 ? "balanced"
-                : day.total_minutes < TARGET_MINUTES
+                : dayTotal < dayTarget
                   ? "under"
                   : "over";
             const loggedMins = dayLoggedMinutes(day);
             const isFullyLogged = loggedMins >= TARGET_MINUTES;
             const dayIsLoading = isDayLoading(day.date);
-            const isOpen = accordionOpen[day.date] ?? true;
+            const isOpen = !isLocked && (accordionOpen[day.date] ?? true);
             const isSubmitting = savingDayDate === day.date;
             const isRefreshing = refreshingDayDate === day.date;
             const isDayBusy =
@@ -1419,15 +1558,18 @@ export default function App() {
                 <header
                   className="day-header"
                   onClick={() => {
-                    if (!dayIsLoading) {
+                    if (!dayIsLoading && !isLocked) {
                       toggleAccordion(day.date);
                     }
                   }}
-                  style={{ cursor: dayIsLoading ? "default" : "pointer" }}
+                  style={{
+                    cursor: dayIsLoading || isLocked ? "default" : "pointer",
+                  }}
                 >
                   <div className="day-header-left">
                     <span
                       className={`accordion-caret${isOpen ? " open" : ""}`}
+                      style={isLocked ? { visibility: "hidden" } : undefined}
                       aria-hidden="true"
                     >
                       ▶
@@ -1441,13 +1583,23 @@ export default function App() {
                           </span>
                         )}
                         <span
-                          className={`day-status-badge ${isFullyLogged ? "badge-logged" : "badge-pending"}`}
+                          className={`day-status-badge ${isLocked ? "badge-exempt" : isFullyLogged ? "badge-logged" : "badge-pending"}`}
                         >
-                          {isFullyLogged ? "logged" : "pending"}
+                          {isLocked ? "exempt" : isFullyLogged ? "logged" : "pending"}
                         </span>
+                        {isLocked && exemptHasLoggedRecords(day) && (
+                          <span
+                            className="exempt-warning-icon"
+                            title={EXEMPT_LOGGED_WARNING}
+                            aria-label={EXEMPT_LOGGED_WARNING}
+                            role="img"
+                          >
+                            ⚠
+                          </span>
+                        )}
                       </div>
                       <p className="day-subtitle">
-                        {day.entries.length} records
+                        {isLocked ? "Sick Leave/PTO" : `${day.entries.length} records`}
                       </p>
                     </div>
                   </div>
@@ -1459,7 +1611,7 @@ export default function App() {
                       className="day-add-btn"
                       title="Add ticket to this day"
                       aria-label="Add ticket"
-                      disabled={isDayBusy}
+                      disabled={isDayBusy || isLocked}
                       onClick={() => openAddTicketModal(day.date)}
                     >
                       <svg
@@ -1507,7 +1659,7 @@ export default function App() {
                     </button>
                     <div className={`day-summary ${balanceClass}`}>
                       <div className="day-summary-meta">
-                        <strong>{formatHours(day.total_minutes)} total</strong>
+                        <strong>{formatHours(dayTotal)} total</strong>
                         <span>{dayBalance}</span>
                         {daySubmitErrors[day.date] && (
                           <p className="day-submit-error">
@@ -1524,21 +1676,22 @@ export default function App() {
                         <button
                           className="ghost danger-ghost"
                           onClick={() => removeAllDayEntries(dayIndex)}
-                          disabled={isDayBusy || day.entries.length === 0 || day.entries.every((entry) => entry.removed)}
+                          disabled={isDayBusy || isLocked || day.entries.length === 0 || day.entries.every((entry) => entry.removed)}
                         >
                           Remove All
                         </button>
                         <button
-                          className="ghost danger-ghost"
-                          onClick={() => resetDayMinutes(dayIndex)}
-                          disabled={isDayBusy}
+                          className={`ghost exempt-toggle${isDraft ? " active" : ""}`}
+                          aria-pressed={isDraft}
+                          onClick={() => toggleExemptDraft(dayIndex)}
+                          disabled={isDayBusy || isLocked}
                         >
-                          Reset Day to 0
+                          Sick Leave/PTO
                         </button>
                         <button
                           className="secondary"
                           onClick={() => void submitDay(dayIndex)}
-                          disabled={isDayBusy || !day.entries.length}
+                          disabled={isDayBusy || isLocked || (!day.entries.length && !isDraft)}
                         >
                           {isSubmitting ? (
                             <>
@@ -1647,6 +1800,17 @@ export default function App() {
                                     className="hmm-input"
                                     value={minutesToHmm(entry.minutes)}
                                     disabled={isDayBusy || entry.removed}
+                                    onFocus={(e) => {
+                                      e.currentTarget.select();
+                                      e.currentTarget.dataset.justFocused = "1";
+                                    }}
+                                    onMouseUp={(e) => {
+                                      // Keep the select-all from focus on the first click only.
+                                      if (e.currentTarget.dataset.justFocused) {
+                                        e.preventDefault();
+                                        delete e.currentTarget.dataset.justFocused;
+                                      }
+                                    }}
                                     onChange={(e) => {
                                       const mins = hmmToMinutes(e.target.value);
                                       if (mins !== null) {
@@ -1656,6 +1820,7 @@ export default function App() {
                                       }
                                     }}
                                     onBlur={(e) => {
+                                      delete e.currentTarget.dataset.justFocused;
                                       const mins = hmmToMinutes(e.target.value);
                                       if (mins === null) {
                                         updateEntry(dayIndex, entryIndex, {
@@ -1867,18 +2032,23 @@ export default function App() {
               {exportReports.map((day) => {
                 const isOpen = exportAccordionOpen[day.date] ?? false;
                 const productiveEntry = productiveEntries[day.date] ?? null;
-                const isLoggedInProductive = productiveAvailable && productiveEntry !== null && !exportEditModeDates.has(day.date);
-                const isPendingMode = !isLoggedInProductive;
+                const isExempt = isExemptLocked(day.date);
+                const planDay = plan?.days.find((d) => d.date === day.date);
+                const isLoggedInProductive = !isExempt && productiveAvailable && productiveEntry !== null && !exportEditModeDates.has(day.date);
+                const isPendingMode = !isExempt && !isLoggedInProductive;
                 const isSubmitting = submittingToProductiveDate === day.date;
                 return (
                   <article
-                    className={`export-day${isOpen ? " open" : ""}${isLoggedInProductive ? " export-day-logged" : ""}`}
+                    className={`export-day${isOpen && !isExempt ? " open" : ""}${isLoggedInProductive ? " export-day-logged" : ""}`}
                     key={day.date}
                   >
                     <header
                       className="export-day-header"
-                      onClick={() => toggleExportAccordion(day.date)}
+                      onClick={() => {
+                        if (!isExempt) toggleExportAccordion(day.date);
+                      }}
                       onKeyDown={(e) => {
+                        if (isExempt) return;
                         if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
                           toggleExportAccordion(day.date);
@@ -1889,13 +2059,29 @@ export default function App() {
                     >
                       <div className="export-day-header-main">
                         <span
-                          className={`accordion-caret${isOpen ? " open" : ""}`}
+                          className={`accordion-caret${isOpen && !isExempt ? " open" : ""}`}
+                          style={isExempt ? { visibility: "hidden" } : undefined}
                           aria-hidden="true"
                         >
                           ▶
                         </span>
                         <h3>{day.heading}</h3>
-                        {productiveAvailable && !productiveLoading && (
+                        {isExempt && (
+                          <>
+                            <span className="day-status-badge badge-exempt">exempt</span>
+                            {planDay && exemptHasLoggedRecords(planDay) && (
+                              <span
+                                className="exempt-warning-icon"
+                                title={EXEMPT_LOGGED_WARNING}
+                                aria-label={EXEMPT_LOGGED_WARNING}
+                                role="img"
+                              >
+                                ⚠
+                              </span>
+                            )}
+                          </>
+                        )}
+                        {!isExempt && productiveAvailable && !productiveLoading && (
                           <span
                             className={`day-status-badge ${isLoggedInProductive ? "badge-logged" : "badge-pending"}`}
                           >
@@ -1943,13 +2129,6 @@ export default function App() {
                           <>
                             <button
                               type="button"
-                              className="copy-day-btn preview-day-btn"
-                              onClick={() => setPreviewDayDate(day.date)}
-                            >
-                              Preview
-                            </button>
-                            <button
-                              type="button"
                               className="copy-day-btn edit-productive-btn"
                               onClick={() => enterExportEditMode(day.date)}
                             >
@@ -1959,7 +2138,7 @@ export default function App() {
                         )}
                       </div>
                     </header>
-                    {isOpen && (
+                    {isOpen && !isExempt && (
                       <div className="export-day-body">
                         {isLoggedInProductive && productiveEntry ? (
                           <div className="export-productive-entry">
