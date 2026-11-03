@@ -1,11 +1,13 @@
 services:
   app:
+    container_name: jira-track
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8080:80"
-    restart: unless-stopped
+      - "127.0.0.1:4700:80"
+    # Never starts on its own: only the launchers (scripts/launch.sh) start it.
+    restart: "no"
     stop_grace_period: 30s
     env_file:
       - path: .env.productive
@@ -23,7 +25,7 @@ services:
       JIRA_TRACK_IN_PROGRESS_STATUSES: ${JIRA_TRACK_IN_PROGRESS_STATUSES:-In Progress}
       JIRA_TRACK_SECONDARY_TRACKING_STATUSES: ${JIRA_TRACK_SECONDARY_TRACKING_STATUSES:-}
       JIRA_TRACK_DEBUG: ${JIRA_TRACK_DEBUG:-false}
-      JIRA_TRACK_CORS_ORIGINS: ${JIRA_TRACK_CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      JIRA_TRACK_CORS_ORIGINS: ${JIRA_TRACK_CORS_ORIGINS:-http://localhost:4700,http://127.0.0.1:4700}
       JIRA_TRACK_WEB_FORWARDED_ALLOW_IPS: ${JIRA_TRACK_WEB_FORWARDED_ALLOW_IPS:-127.0.0.1}
       JIRA_TRACK_WEB_RELOAD: "false"
     healthcheck:

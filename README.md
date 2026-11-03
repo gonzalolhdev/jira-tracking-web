@@ -8,7 +8,7 @@ The project now includes a visual month planner web app where you can edit per-d
 
 ### One-command local run (Docker)
 
-Use one command to build and run frontend + API at http://localhost:8080:
+Use one command to build and run frontend + API at http://localhost:4700:
 
 ```bash
 docker compose up --build
@@ -19,11 +19,14 @@ The container runs:
 - Nginx for the frontend (SPA)
 - Uvicorn backend API (proxied as `/api`)
 - Compose healthcheck against `/api/health`
-- Restart policy `unless-stopped` for server-style operation
+- Restart policy `"no"`: the container never starts on its own, only the launchers start it
 
-### On-demand launcher (macOS Dock icon)
+### On-demand launcher (macOS Dock icons)
 
-Click an icon in your Dock to start the app, no terminals needed.
+Click an icon in your Dock to start the app, no terminals needed. There are two apps:
+
+- **Jira Track** (hot launch): opens the app. Resumes the existing container if it is stopped, reuses it if it is running. It never rebuilds, so it does **not** pick up code or env changes. This is the one for daily use. If no container exists yet, it falls back to a cold launch.
+- **Jira Track (cold)** (cold launch, snowflake icon): rebuilds the image and recreates the container, re-reading `.env` and `.env.productive`. Use it after `git pull` or after editing an env file. If the app window is open it is reloaded.
 
 Prerequisites: macOS, [Docker Desktop](https://www.docker.com/products/docker-desktop/), Google Chrome, Git.
 
@@ -33,14 +36,16 @@ Prerequisites: macOS, [Docker Desktop](https://www.docker.com/products/docker-de
    cp .env.example .env
    cp .env.productive.example .env.productive
    ```
-3. From the repo root, build the launcher:
+3. From the repo root, build the launchers:
    ```bash
-   scripts/build-app.sh
+   scripts/build-apps.sh
    ```
-4. Open `~/Applications` in Finder (Cmd+Shift+G, paste `~/Applications`) and drag **Jira Track** to your Dock.
-5. Click it. The first run takes a few minutes while the image builds; if macOS blocks it, right-click the app and choose Open.
+4. Open `~/Applications` in Finder (Cmd+Shift+G, paste `~/Applications`) and drag both apps to your Dock.
+5. Click **Jira Track (cold)** the first time. The build takes a few minutes; if macOS blocks it, right-click the app and choose Open.
 
-When you're done: `scripts/launch.sh stop`. If you move the repo, re-run `scripts/build-app.sh`.
+The app is served at http://localhost:4700 (this machine only). Closing the window does not stop the container. To stop it without deleting it: `scripts/launch.sh stop`; the hot app resumes it. For a full teardown, run `docker compose down`. If you move the repo, re-run `scripts/build-apps.sh`. Log: `$TMPDIR/jira-track-launcher.log`.
+
+Per-app settings (name, port, icons) live in `scripts/launcher.conf`. The convention shared by all my local apps is in the `local-app-launcher` skill.
 
 ### Docker setup
 
