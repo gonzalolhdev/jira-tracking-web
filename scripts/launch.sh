@@ -12,6 +12,23 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=launcher.conf
 source "$ROOT/scripts/launcher.conf"
 URL="http://localhost:$PORT"
+
+# Chrome profile: launcher.conf default, overridden by "<APP_SLUG>=<dir>" in ~/.local-apps/chrome-profiles.conf.
+PROFILE="${CHROME_PROFILE:-}"
+OVERRIDES="$HOME/.local-apps/chrome-profiles.conf"
+if [ -f "$OVERRIDES" ]; then
+  override="$(sed -n "s/^$APP_SLUG=//p" "$OVERRIDES" | tail -n 1)"
+  [ -n "$override" ] && PROFILE="$override"
+fi
+# With a profile, the window URL carries a "#cp=<profile>" marker so focus_existing only matches
+# this profile's window (Chrome's AppleScript cannot tell which profile a window belongs to).
+# Without one, behaviour is unchanged.
+APP_URL="$URL"
+CHROME_ARGS=()
+if [ -n "$PROFILE" ]; then
+  APP_URL="$URL/#cp=${PROFILE// /-}"
+  CHROME_ARGS=(--profile-directory="$PROFILE")
+fi
 LOG="${TMPDIR:-/tmp}/$APP_SLUG-launcher.log"
 MODE="${1:-hot}"
 
@@ -36,7 +53,7 @@ focus_existing() {
 tell application "Google Chrome"
   repeat with w in windows
     repeat with t in tabs of w
-      if URL of t starts with "$URL" then
+      if URL of t starts with "$APP_URL" then
         if "$reload" is "reload" then reload t
         set index of w to 1
         activate
@@ -92,4 +109,4 @@ fi
 wait_healthy
 notify "Ready"
 
-focus_existing "$reload" || open -na "Google Chrome" --args --app="$URL"
+focus_existing "$reload" || open -na "Google Chrome" --args ${CHROME_ARGS[@]+"${CHROME_ARGS[@]}"} --app="$APP_URL"
