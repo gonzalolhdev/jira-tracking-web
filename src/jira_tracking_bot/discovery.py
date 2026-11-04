@@ -4,6 +4,12 @@ from datetime import date, datetime, time, timedelta
 
 from jira_tracking_bot.config import AppConfig
 
+# Tickets last updated on or before this date are excluded from the day snapshots.
+# Historical WAS clauses return stale tickets because of the on-prem -> Cloud migration
+# (see docs/jira-cloud-historical-jql-false-positives.md).
+_STALE_UPDATED_CUTOFF = "2026-08-23"
+_NOT_STALE_CLAUSE = f'updated > "{_STALE_UPDATED_CUTOFF} 23:59"'
+
 
 def build_period_window(period: str, tz_now: datetime | None = None) -> tuple[datetime, datetime]:
     if period not in {"day", "week", "month"}:
@@ -63,6 +69,7 @@ def build_jql_for_day_snapshot(config: AppConfig, day: date) -> str:
         clauses.append(f"project in ({quoted})")
 
     clauses.append(f'(resolution is EMPTY OR resolved >= "{day_str}")')
+    clauses.append(_NOT_STALE_CLAUSE)
 
     return " AND ".join(clauses) + " ORDER BY updated DESC"
 
@@ -96,6 +103,7 @@ def build_jql_for_day_secondary_snapshot(config: AppConfig, day: date) -> str | 
         clauses.append(f"project in ({quoted})")
 
     clauses.append(f'(resolution is EMPTY OR resolved >= "{day_str}")')
+    clauses.append(_NOT_STALE_CLAUSE)
 
     return " AND ".join(clauses) + " ORDER BY updated DESC"
 

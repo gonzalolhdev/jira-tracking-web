@@ -128,3 +128,23 @@ def test_build_jql_for_day_secondary_snapshot_supports_bounded_during_mode() -> 
     assert 'assignee WAS IN (currentUser()) DURING ("2026-04-01 00:00", "2026-04-02 00:00")' in jql
     assert 'status WAS IN ("In Review") DURING ("2026-04-01 00:00", "2026-04-02 00:00")' in jql
     assert '(resolution is EMPTY OR resolved >= "2026-04-01")' in jql
+
+
+def test_day_snapshots_exclude_tickets_not_updated_since_migration_cutoff() -> None:
+    day = datetime(2026, 4, 1, 9, 0, tzinfo=ZoneInfo("UTC")).date()
+    for mode in ("on_day", "bounded_during"):
+        config = AppConfig(
+            jira_base_url="https://example.atlassian.net",
+            jira_email="user@example.com",
+            jira_token="token-123",
+            timezone="Europe/Madrid",
+            secondary_tracking_statuses=["In Review"],
+            daily_snapshot_mode=mode,
+        )
+
+        primary = build_jql_for_day_snapshot(config, day)
+        secondary = build_jql_for_day_secondary_snapshot(config, day)
+
+        assert secondary is not None
+        assert 'updated > "2026-08-23 23:59"' in primary
+        assert 'updated > "2026-08-23 23:59"' in secondary
