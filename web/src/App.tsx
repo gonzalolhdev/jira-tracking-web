@@ -269,6 +269,13 @@ function getMonthOptions(): { label: string; value: string }[] {
   return options;
 }
 
+type Page = "jira" | "productive";
+
+function pageFromHash(): Page {
+  if (typeof window === "undefined") return "jira";
+  return window.location.hash === "#/productive" ? "productive" : "jira";
+}
+
 export default function App() {
   const [plan, setPlan] = useState<MonthPlan | null>(null);
   const [loading, setLoading] = useState(true);
@@ -302,7 +309,7 @@ export default function App() {
   const [storageWarning, setStorageWarning] = useState<string | null>(null);
   const [activityDrawerOpen, setActivityDrawerOpen] = useState(false);
   const [activityLogs, setActivityLogs] = useState<ActivityLogItem[]>([]);
-  const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [page, setPage] = useState<Page>(() => pageFromHash());
   const [exportAccordionOpen, setExportAccordionOpen] = useState<
     Record<string, boolean>
   >({});
@@ -766,25 +773,6 @@ export default function App() {
     });
   }
 
-  async function rebalance() {
-    if (!plan) return;
-    setError(null);
-    try {
-      const resp = await fetch("/api/month/rebalance", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(plan),
-      });
-      if (!resp.ok) {
-        throw new Error(await responseDetail(resp));
-      }
-      const data = (await resp.json()) as MonthPlan;
-      setPlan(data);
-    } catch (err) {
-      reportError(err instanceof Error ? err.message : "Failed to rebalance");
-    }
-  }
-
   async function submitMonth() {
     if (!plan) return;
     const exemptDraftDays = plan.days.filter((day) => isExemptDraft(day));
@@ -1042,22 +1030,6 @@ export default function App() {
     }
   }
 
-  const dayStats = useMemo(() => {
-    if (!plan) return { exact: 0, under: 0, over: 0 };
-    let exact = 0;
-    let under = 0;
-    let over = 0;
-    for (const day of plan.days) {
-      const target =
-        isExemptLocked(day.date) || isExemptDraft(day) ? 0 : TARGET_MINUTES;
-      const total = isExemptLocked(day.date) ? 0 : day.total_minutes;
-      if (total === target) exact += 1;
-      else if (total < target) under += 1;
-      else over += 1;
-    }
-    return { exact, under, over };
-  }, [plan, exemptStored, exemptDraftDates]);
-
   useEffect(() => {
     if (!plan) return;
     setExemptDraftDates((current) => {
@@ -1136,23 +1108,22 @@ export default function App() {
     }
   }, [previewDayDate, exportReports]);
 
-  function openExportModal() {
+  function enterProductivePage() {
     setExportModalView("reports");
     setPreviewDayDate(null);
     setExportAccordionOpen(
       exportReports[0] ? { [exportReports[0].date]: true } : {},
     );
     setExportEditModeDates(new Set());
-    setExportModalOpen(true);
     void loadProductiveEntries();
   }
 
-  async function loadProductiveEntries() {
+  async function loadProductiveEntries(month: string = selectedMonth) {
     setProductiveLoading(true);
     setProductiveError(null);
     try {
-      const url = selectedMonth
-        ? `/api/productive/time-entries?month=${encodeURIComponent(selectedMonth)}`
+      const url = month
+        ? `/api/productive/time-entries?month=${encodeURIComponent(month)}`
         : "/api/productive/time-entries";
       const resp = await fetch(url);
       if (!resp.ok) {
@@ -1227,13 +1198,6 @@ export default function App() {
       next.delete(date);
       return next;
     });
-  }
-
-  function closeExportModal() {
-    setPreviewDayDate(null);
-    setExportModalView("reports");
-    setExportEditModeDates(new Set());
-    setExportModalOpen(false);
   }
 
   function toggleExportAccordion(date: string) {
@@ -1394,6 +1358,20 @@ export default function App() {
     }
   }
 
+  useEffect(() => {
+    const onHashChange = () => setPage(pageFromHash());
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  const authReady = !!authStatus && !requiresTokenSetup(authStatus);
+  useEffect(() => {
+    if (page === "productive" && authReady) {
+      enterProductivePage();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, authReady]);
+
   const previewDay = previewDayDate
     ? (exportReports.find((day) => day.date === previewDayDate) ?? null)
     : null;
@@ -1402,7 +1380,7 @@ export default function App() {
     return (
       <main className="page gate-page">
         <section className="gate-card">
-          <p className="eyebrow">Jira Time Tracker</p>
+          <p className="eyebrow">Time Tracker</p>
           <h1>Token setup required</h1>
           <p className="gate-copy">
             Configure a valid Jira Cloud API token to access month planning and
@@ -1424,50 +1402,62 @@ export default function App() {
   return (
     <main className="page">
       <header className="topbar">
-        <h1 className="topbar-title">Jira Time Tracker</h1>
-        <div className="topbar-actions">
-          <button
-            className="secondary"
-            onClick={() => setActivityDrawerOpen((open) => !open)}
-          >
-            {activityDrawerOpen
-              ? "Close Activity"
-              : `Activity (${activityLogs.length})`}
-          </button>
-          <button onClick={() => void loadPlan()} disabled={loading}>
-            Reload Month
-          </button>
-          <button onClick={() => void rebalance()} disabled={!plan || loading}>
-            Rebalance to 8h/day
-          </button>
-          <button onClick={() => openExportModal()} disabled={!plan || loading}>
-            Export Logs
-          </button>
-          <button
-            className="primary"
-            onClick={() => void submitMonth()}
-            disabled={!plan || savingMonth}
-          >
-            {savingMonth ? "Submitting..." : "Submit Month"}
-          </button>
+        <div className="topbar-left">
+          <div className="topbar-brand">
+            <svg
+              className="topbar-logo"
+              viewBox="0 0 24 24"
+              width="20"
+              height="20"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="9" />
+              <path d="M12 7v5l3 2" />
+            </svg>
+            <h1 className="topbar-title">Time Tracker</h1>
+          </div>
+          <nav className="topbar-nav" aria-label="Pages">
+            <a
+              href="#/jira"
+              className={page === "jira" ? "active" : ""}
+              aria-current={page === "jira" ? "page" : undefined}
+            >
+              Jira
+            </a>
+            <a
+              href="#/productive"
+              className={page === "productive" ? "active" : ""}
+              aria-current={page === "productive" ? "page" : undefined}
+            >
+              Productive
+            </a>
+          </nav>
         </div>
-      </header>
-
-      {error && <p className="error">{error}</p>}
-      {storageWarning && <p className="warning-small">{storageWarning}</p>}
-
-      {plan && (
-        <section className="stats">
+        <div className="topbar-actions">
+          {page === "jira" && (
+            <button
+              className="primary"
+              onClick={() => void submitMonth()}
+              disabled={!plan || savingMonth}
+            >
+              {savingMonth ? "Submitting..." : "Submit Month"}
+            </button>
+          )}
           <div
-            className="stat-card month-selector-card"
-            style={{ "--stat-accent": "#4f8ef7" } as React.CSSProperties}
+            className="month-picker"
             onClick={() => setMonthDropdownOpen((v) => !v)}
             role="button"
             aria-haspopup="listbox"
             aria-expanded={monthDropdownOpen}
           >
-            <span>Month</span>
-            <strong>{plan.month}</strong>
+            <span className="month-picker-label">
+              {plan?.month || selectedMonth || "Current"}
+            </span>
             <span className="month-selector-caret" aria-hidden="true">
               {monthDropdownOpen ? "▲" : "▼"}
             </span>
@@ -1488,6 +1478,9 @@ export default function App() {
                       setMonthDropdownOpen(false);
                       setPlan(null);
                       void loadPlan(opt.value);
+                      if (page === "productive") {
+                        void loadProductiveEntries(opt.value);
+                      }
                     }}
                   >
                     {opt.label}
@@ -1496,29 +1489,11 @@ export default function App() {
               </ul>
             )}
           </div>
-          <div
-            className="stat-card"
-            style={{ "--stat-accent": "#4ade80" } as React.CSSProperties}
-          >
-            <span>On target</span>
-            <strong>{dayStats.exact}</strong>
-          </div>
-          <div
-            className="stat-card"
-            style={{ "--stat-accent": "#eab308" } as React.CSSProperties}
-          >
-            <span>Under 8h</span>
-            <strong>{dayStats.under}</strong>
-          </div>
-          <div
-            className="stat-card"
-            style={{ "--stat-accent": "#f87171" } as React.CSSProperties}
-          >
-            <span>Over 8h</span>
-            <strong>{dayStats.over}</strong>
-          </div>
-        </section>
-      )}
+        </div>
+      </header>
+
+      {error && <p className="error">{error}</p>}
+      {storageWarning && <p className="warning-small">{storageWarning}</p>}
 
       {loading && (
         <p className="loading">
@@ -1528,7 +1503,7 @@ export default function App() {
       )}
 
       {plan && (
-        <section className="days-grid">
+        <section className="days-grid" hidden={page !== "jira"}>
           {plan.days.map((day, dayIndex) => {
             const isLocked = isExemptLocked(day.date);
             const isDraft = isExemptDraft(day);
@@ -1963,19 +1938,10 @@ export default function App() {
         </form>
       </section>
 
-      {exportModalOpen && (
-        <button
-          type="button"
-          className="export-backdrop"
-          aria-label="Close export modal"
-          onClick={() => closeExportModal()}
-        />
-      )}
-
       <section
-        className={`export-modal${exportModalOpen ? " open" : ""}`}
+        className="export-page"
         aria-label="Daily export report"
-        aria-hidden={!exportModalOpen}
+        hidden={page !== "productive"}
       >
         <header className="export-modal-header">
           <div>
@@ -1995,18 +1961,14 @@ export default function App() {
                 + Add Activities
               </button>
             ) : null}
-            <button
-              className="ghost"
-              onClick={() => {
-                if (exportModalView === "activities") {
-                  setExportModalView("reports");
-                  return;
-                }
-                closeExportModal();
-              }}
-            >
-              {exportModalView === "activities" ? "Back" : "Close"}
-            </button>
+            {exportModalView === "activities" ? (
+              <button
+                className="ghost"
+                onClick={() => setExportModalView("reports")}
+              >
+                Back
+              </button>
+            ) : null}
           </div>
         </header>
 
@@ -2504,6 +2466,30 @@ export default function App() {
           </section>
         </>
       ) : null}
+
+      {activityLogs.length > 0 && !activityDrawerOpen && (
+        <button
+          type="button"
+          className="activity-fab"
+          aria-label={`Open activity (${activityLogs.length})`}
+          onClick={() => setActivityDrawerOpen(true)}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="22"
+            height="22"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M4 6h16M4 12h16M4 18h10" />
+          </svg>
+          <span className="activity-fab-badge">{activityLogs.length}</span>
+        </button>
+      )}
 
       {activityDrawerOpen && (
         <button

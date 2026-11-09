@@ -1,4 +1,4 @@
-# Jira Tracking Web
+# Time Tracker
 
 Local CLI to discover Jira tickets you worked on and submit worklogs with explicit confirmation.
 
@@ -25,8 +25,8 @@ The container runs:
 
 Click an icon in your Dock to start the app, no terminals needed. There are two apps:
 
-- **Jira Track** (hot launch): opens the app. Resumes the existing container if it is stopped, reuses it if it is running. It never rebuilds, so it does **not** pick up code or env changes. This is the one for daily use. If no container exists yet, it falls back to a cold launch.
-- **Jira Track (cold)** (cold launch, snowflake icon): rebuilds the image and recreates the container, re-reading `.env` and `.env.productive`. Use it after `git pull` or after editing an env file. If the app window is open it is reloaded.
+- **Time Tracker** (hot launch): opens the app. Resumes the existing container if it is stopped, reuses it if it is running. It never rebuilds, so it does **not** pick up code or env changes. This is the one for daily use. If no container exists yet, it falls back to a cold launch.
+- **Time Tracker (cold)** (cold launch, snowflake icon): rebuilds the image and recreates the container, re-reading `.env` and `.env.productive`. Use it after `git pull` or after editing an env file. If the app window is open it is reloaded.
 
 Prerequisites: macOS, [Docker Desktop](https://www.docker.com/products/docker-desktop/), Google Chrome, Git.
 
@@ -41,7 +41,7 @@ Prerequisites: macOS, [Docker Desktop](https://www.docker.com/products/docker-de
    scripts/build-apps.sh
    ```
 4. Open `~/Applications` in Finder (Cmd+Shift+G, paste `~/Applications`) and drag both apps to your Dock.
-5. Click **Jira Track (cold)** the first time. The build takes a few minutes; if macOS blocks it, right-click the app and choose Open.
+5. Click **Time Tracker (cold)** the first time. The build takes a few minutes; if macOS blocks it, right-click the app and choose Open.
 
 The app is served at http://localhost:4700 (this machine only). Closing the window does not stop the container. To stop it without deleting it: `scripts/launch.sh stop`; the hot app resumes it. For a full teardown, run `docker compose down`. If you move the repo, re-run `scripts/build-apps.sh`. Log: `$TMPDIR/jira-track-launcher.log`.
 
